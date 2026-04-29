@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - Docker версия с автоматическим туннелем
+SUPER RADIO BOT - Синхронная версия
 """
 
 import os
@@ -13,13 +13,13 @@ import re
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from mutagen.mp3 import MP3
 
 # ==================== КОНФИГУРАЦИЯ ====================
 PORT = 8080
 MUSIC_FOLDER = "music"
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q")
+TOKEN = "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q"
 
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
@@ -30,18 +30,16 @@ current_song_data = None
 current_song_position = 0
 clients = []
 public_url = None
-tunnel_process = None
 tunnel_ready = False
 
 # ==================== ЗАПУСК ТУННЕЛЯ ====================
 def start_tunnel():
     """Запуск SSH туннеля через pinggy.io"""
-    global public_url, tunnel_ready, tunnel_process
+    global public_url, tunnel_ready
     
-    # Пробуем pinggy.io
     try:
         print("🔄 Запуск туннеля через pinggy.io...")
-        tunnel_process = subprocess.Popen(
+        process = subprocess.Popen(
             ['ssh', '-p', '443', '-R0:localhost:8080', 'a.pinggy.io'],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -51,12 +49,11 @@ def start_tunnel():
         
         # Ждём URL
         for i in range(60):
-            if tunnel_process.stdout:
+            if process.stdout:
                 try:
-                    line = tunnel_process.stdout.readline()
+                    line = process.stdout.readline()
                     if line:
                         print(f"  {line.strip()}")
-                        # Ищем URL
                         match = re.search(r'https://[a-z0-9]+\.a\.pinggy\.link', line)
                         if match:
                             public_url = match.group(0)
@@ -68,37 +65,7 @@ def start_tunnel():
                     pass
             time.sleep(1)
     except Exception as e:
-        print(f"Ошибка pinggy: {e}")
-    
-    # Запасной вариант
-    try:
-        print("🔄 Пробуем localhost.run...")
-        tunnel_process = subprocess.Popen(
-            ['ssh', '-R', '80:localhost:8080', 'localhost.run'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        
-        for i in range(30):
-            if tunnel_process.stdout:
-                try:
-                    line = tunnel_process.stdout.readline()
-                    if line:
-                        print(f"  {line.strip()}")
-                        match = re.search(r'https://[a-z0-9\-]+\.loca\.lt', line)
-                        if match:
-                            public_url = match.group(0)
-                            tunnel_ready = True
-                            print(f"\n✅ ТУННЕЛЬ СОЗДАН!")
-                            print(f"🔗 ПУБЛИЧНАЯ ССЫЛКА: {public_url}")
-                            return True
-                except:
-                    pass
-            time.sleep(1)
-    except Exception as e:
-        print(f"Ошибка localhost.run: {e}")
+        print(f"Ошибка: {e}")
     
     print("⚠️ Не удалось создать туннель")
     return False
@@ -177,7 +144,6 @@ class RadioHandler(BaseHTTPRequestHandler):
 <head>
     <meta charset="UTF-8">
     <title>🎵 Super Radio</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body{{
             font-family:'Segoe UI',sans-serif;
@@ -282,17 +248,11 @@ def background_stream():
         time.sleep(0.05)
 
 # ==================== TELEGRAM БОТ ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global tunnel_ready
-    
-    # Ждём готовности туннеля (максимум 60 секунд)
-    for i in range(60):
-        if tunnel_ready and public_url:
-            break
-        await asyncio.sleep(1)
+def start_command(update: Update, context):
+    global tunnel_ready, public_url
     
     if not tunnel_ready or not public_url:
-        await update.message.reply_text(
+        update.message.reply_text(
             "⏳ *Радио запускается...*\n\n"
             "Подождите 30-60 секунд, туннель создаётся.\n"
             "Затем отправьте /start снова!",
@@ -302,16 +262,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     info = get_song_info()
     web_url = public_url
-    stream_url = f"{web_url}/radio.mp3"
     
     keyboard = [
         [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
-        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=stream_url)],
+        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=f"{web_url}/radio.mp3")],
         [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
         [InlineKeyboardButton("📤 ДОБАВИТЬ ТРЕК", callback_data="upload")]
     ]
     
-    await update.message.reply_text(
+    update.message.reply_text(
         f"🎵 *SUPER RADIO*\n\n"
         f"🎤 `{info['title']}`\n"
         f"👥 {len(clients)} слушателей\n"
@@ -322,14 +281,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def callback_handler(update: Update, context):
     query = update.callback_query
-    await query.answer()
+    query.answer()
     
     if query.data == "status":
         info = get_song_info()
-        web_url = public_url if public_url else "Ожидание туннеля..."
-        await query.edit_message_text(
+        web_url = public_url if public_url else "Ожидание..."
+        query.edit_message_text(
             f"📊 *СТАТУС*\n\n"
             f"🎵 {info['title']}\n"
             f"👥 {len(clients)} слушателей\n"
@@ -338,33 +297,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     elif query.data == "upload":
-        await query.edit_message_text(
+        query.edit_message_text(
             "📤 *ЗАГРУЗКА МУЗЫКИ*\n\n"
             "Отправьте MP3 файл боту, и он добавится в плейлист!\n\n"
             "✅ Поддерживаются MP3 до 50MB",
             parse_mode='Markdown'
         )
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_audio(update: Update, context):
     if update.message.audio:
         file = update.message.audio
-        msg = await update.message.reply_text(f"📥 Загружаю {file.file_name}...")
+        msg = update.message.reply_text(f"📥 Загружаю {file.file_name}...")
         
         try:
-            new_file = await context.bot.get_file(file.file_id)
+            new_file = context.bot.get_file(file.file_id)
             file_path = Path(MUSIC_FOLDER) / file.file_name
-            await new_file.download_to_drive(file_path)
+            new_file.download_to_drive(file_path)
             load_playlist()
-            await msg.edit_text(f"✅ Добавлено! Всего песен: {len(playlist)}")
+            msg.edit_text(f"✅ Добавлено! Всего песен: {len(playlist)}")
         except Exception as e:
-            await msg.edit_text(f"❌ Ошибка: {str(e)}")
+            msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def link_command(update: Update, context):
     if not tunnel_ready or not public_url:
-        await update.message.reply_text("⏳ Туннель ещё создаётся, подождите 30 секунд...")
+        update.message.reply_text("⏳ Туннель ещё создаётся, подождите 30 секунд...")
         return
     
-    await update.message.reply_text(
+    update.message.reply_text(
         f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
         f"`{public_url}`\n\n"
         f"📱 Отправьте эту ссылку друзьям!\n"
@@ -373,47 +332,53 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ==================== ЗАПУСК ====================
-async def main():
-    global public_url, tunnel_ready
+def main():
+    global tunnel_ready, public_url
     
     print("\n" + "=" * 50)
-    print("🎵 SUPER RADIO BOT v2.0")
+    print("🎵 SUPER RADIO BOT")
     print("=" * 50)
     
     # Загружаем плейлист
     load_playlist()
     
-    # Запускаем радио сервер
+    # Запускаем радио сервер в потоке
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
     time.sleep(2)
     
-    # Запускаем стриминг
+    # Запускаем стриминг в потоке
     stream_thread = threading.Thread(target=background_stream, daemon=True)
     stream_thread.start()
     
-    # Запускаем туннель в отдельном потоке
+    # Запускаем туннель в потоке
     tunnel_thread = threading.Thread(target=start_tunnel, daemon=True)
     tunnel_thread.start()
     
-    # Запускаем бота
+    # Ждём туннель (максимум 60 секунд)
+    print("\n🔄 Ожидание создания туннеля...")
+    for i in range(60):
+        if tunnel_ready:
+            break
+        time.sleep(1)
+    
+    if tunnel_ready and public_url:
+        print(f"\n✅ ТУННЕЛЬ ГОТОВ: {public_url}")
+    else:
+        print("\n⚠️ Туннель не создан, бот будет работать локально")
+    
+    # Запускаем бота (синхронно)
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     
-    # Очистка вебхука
-    print("\n🔄 Очистка вебхука...")
-    await app.bot.delete_webhook()
-    
     print("\n✅ БОТ ЗАПУЩЕН!")
-    print("⏳ Ожидание создания туннеля (до 60 секунд)...")
     print("=" * 50 + "\n")
     
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    main()
