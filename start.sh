@@ -4,29 +4,45 @@ echo "========================================="
 echo "🎵 RADIO BOT STARTING"
 echo "========================================="
 
-# Ждем запуска Icecast
-sleep 5
+# Проверяем, запущен ли Icecast
+if ! pgrep -x "icecast2" > /dev/null; then
+    echo "🔄 Запуск Icecast..."
+    sudo systemctl start icecast2
+    sleep 3
+fi
 
-# Запускаем FFmpeg для стриминга плейлиста
-play_playlist() {
-    while true; do
-        for song in /app/music/*.mp3; do
-            if [ -f "$song" ]; then
-                echo "🎵 Playing: $(basename "$song")"
-                ffmpeg -re -i "$song" -c copy -f mp3 icecast://source:hackme@localhost:8000/stream 2>/dev/null
-                sleep 0.5
-            fi
-        done
-    done
-}
+# Проверяем, работает ли Icecast
+echo "🔍 Проверка Icecast..."
+if curl -s http://localhost:8000/stream -o /dev/null; then
+    echo "✅ Icecast работает"
+else
+    echo "❌ Icecast не отвечает"
+fi
 
-# Запускаем поток в фоне
-play_playlist &
-FFMPEG_PID=$!
+# Открываем порт в фаерволе (Ubuntu/Debian)
+echo "🔓 Открываем порт 8000..."
+if command -v ufw &> /dev/null; then
+    sudo ufw allow 8000/tcp
+    sudo ufw reload
+    echo "✅ Порт 8000 открыт через ufw"
+elif command -v firewall-cmd &> /dev/null; then
+    sudo firewall-cmd --add-port=8000/tcp --permanent
+    sudo firewall-cmd --reload
+    echo "✅ Порт 8000 открыт через firewalld"
+else
+    echo "⚠️ Фаервол не найден, порт нужно открыть вручную"
+fi
 
-# Запускаем бота
-echo "🚀 Starting Telegram bot..."
-python bot.py
+# Показываем информацию о сети
+echo ""
+echo "📡 ИНФОРМАЦИЯ О ДОСТУПЕ:"
+echo "   Локальный IP: $(hostname -I | awk '{print $1}')"
+echo "   Внешний IP: $(curl -s https://api.ipify.org)"
+echo "   Порт: 8000"
+echo ""
+echo "🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ: http://$(curl -s https://api.ipify.org):8000/stream"
+echo ""
 
-# Останавливаем FFmpeg при завершении
-kill $FFMPEG_PID
+# Запускаем Telegram бота
+echo "🚀 Запуск бота..."
+python3 bot.py
