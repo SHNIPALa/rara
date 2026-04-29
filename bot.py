@@ -1,335 +1,366 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT + ICECAST
-Профессиональное интернет-радио с Icecast
+ПРОСТОЕ РАДИО - работает напрямую через ваш IP
+Без Icecast, без Ngrok, без LocalTunnel
 """
 
 import os
 import time
 import threading
-import sqlite3
-import random
 import subprocess
-import signal
+import random
+import socket
 from pathlib import Path
-from datetime import datetime
-from typing import List, Optional
-
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from mutagen.mp3 import MP3
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# ==================== КОНФИГУРАЦИЯ ====================
+# ==================== НАСТРОЙКИ ====================
+PORT = 8080
 MUSIC_FOLDER = "music"
-ICECAST_URL = "icecast:8000"
-ICECAST_SOURCE = "source:superpass"
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
+TOKEN = "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q"
 
-# Публичный URL (будет получен из ngrok)
-PUBLIC_URL = None
-STREAM_URL = None
+# Получаем внешний IP
+def get_public_ip():
+    try:
+        import requests
+        ip = requests.get('https://api.ipify.org', timeout=3).text
+        return ip
+    except:
+        return socket.gethostbyname(socket.gethostname())
 
+PUBLIC_IP = get_public_ip()
+STREAM_URL = f"http://{PUBLIC_IP}:{PORT}/radio.mp3"
+
+print(f"\n🌍 ВАШ ВНЕШНИЙ IP: {PUBLIC_IP}")
+print(f"🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ: {STREAM_URL}\n")
+
+# Создаем папку для музыки
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
 # Глобальные переменные
-playlist: List[Path] = []
+playlist = []
 current_song_index = 0
-current_status = "⏸️ Остановлено"
-listeners = 0
-ffmpeg_process = None
+current_song_data = None
+current_song_position = 0
+clients = []
+stream_active = True
 
-# ==================== БАЗА ДАННЫХ ====================
-def init_db():
-    conn = sqlite3.connect('radio.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS stats
-                 (key TEXT PRIMARY KEY, value TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  song_name TEXT, date TEXT)''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ==================== ПЛЕЙЛИСТ ====================
+# ==================== ЗАГРУЗКА ПЛЕЙЛИСТА ====================
 def load_playlist():
     global playlist
-    playlist = []
-    for mp3 in Path(MUSIC_FOLDER).rglob("*.mp3"):
-        playlist.append(mp3)
+    playlist = list(Path(MUSIC_FOLDER).glob("*.mp3"))
     if playlist:
         random.shuffle(playlist)
         print(f"📀 Загружено {len(playlist)} песен")
         for i, song in enumerate(playlist[:5]):
             print(f"   {i+1}. {song.name}")
-        if len(playlist) > 5:
-            print(f"   ... и еще {len(playlist)-5}")
     else:
         print(f"⚠️ НЕТ MP3! Положите файлы в папку 'music'")
     return len(playlist)
 
-def get_current_song():
-    if playlist and current_song_index < len(playlist):
-        return playlist[current_song_index]
-    return None
+def get_song_duration(song_path):
+    try:
+        return int(MP3(song_path).info.length)
+    except:
+        return 180
 
 def next_song():
-    global current_song_index, ffmpeg_process, current_status
-    
-    if not playlist:
-        return None
-    
+    global current_song_index, current_song_data, current_song_position, clients
     current_song_index = (current_song_index + 1) % len(playlist)
-    song = get_current_song()
+    current_song_data = open(playlist[current_song_index], 'rb')
+    current_song_position = 0
+    print(f"🎵 Сейчас играет: {playlist[current_song_index].name}")
+
+# ==================== HTTP СЕРВЕР (РАЗДАЁТ РАДИО) ====================
+class RadioHandler(BaseHTTPRequestHandler):
     
-    if song:
-        current_status = f"🎵 {song.stem}"
-        print(f"🎵 Следующий трек: {song.name}")
+    def log_message(self, format, *args):
+        pass  # Отключаем лишние логи
+    
+    def do_GET(self):
+        global clients, current_song_data, current_song_position, playlist
         
-        # Останавливаем текущий ffmpeg
-        if ffmpeg_process:
-            ffmpeg_process.terminate()
-            time.sleep(1)
+        # Главная страница с плеером
+        if self.path == '/' or self.path == '/player':
+            html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <title>🎵 Super Radio</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }}
+        .player {{
+            background: rgba(255,255,255,0.95);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 450px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }}
+        h1 {{
+            color: #764ba2;
+            margin-bottom: 10px;
+        }}
+        .status {{
+            color: #4caf50;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }}
+        audio {{
+            width: 100%;
+            margin: 20px 0;
+            border-radius: 30px;
+        }}
+        .url {{
+            background: #f0f0f0;
+            padding: 12px;
+            border-radius: 10px;
+            font-size: 12px;
+            word-break: break-all;
+            margin-top: 20px;
+        }}
+        .button {{
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 25px;
+            text-decoration: none;
+            margin-top: 15px;
+        }}
+        footer {{
+            margin-top: 20px;
+            font-size: 11px;
+            color: #999;
+        }}
+    </style>
+</head>
+<body>
+    <div class="player">
+        <h1>🎵 Super Radio</h1>
+        <div class="status">🟢 ONLINE</div>
+        <audio controls autoplay>
+            <source src="/radio.mp3" type="audio/mpeg">
+            Ваш браузер не поддерживает аудио
+        </audio>
+        <div class="url">
+            🔗 Прямая ссылка:<br>
+            <a href="/radio.mp3">{STREAM_URL}</a>
+        </div>
+        <a href="/radio.mp3" class="button">📥 Скачать поток</a>
+        <footer>24/7 | Бесконечный поток | Слушайте в любом плеере</footer>
+    </div>
+</body>
+</html>'''
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(html.encode())
+            return
         
-        # Записываем в историю
-        conn = sqlite3.connect('radio.db')
-        c = conn.cursor()
-        c.execute("INSERT INTO history (song_name, date) VALUES (?, ?)",
-                  (song.name, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-    
-    return song
+        # Аудио поток
+        elif self.path == '/radio.mp3' or self.path == '/stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Cache-Control', 'no-cache, no-store')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Connection', 'keep-alive')
+            self.end_headers()
+            
+            # Добавляем клиента
+            clients.append(self.wfile)
+            print(f"🔊 Новый слушатель (всего: {len(clients)})")
+            
+            try:
+                # Держим соединение открытым
+                while True:
+                    time.sleep(1)
+                    if not stream_active:
+                        break
+            except:
+                pass
+            finally:
+                if self.wfile in clients:
+                    clients.remove(self.wfile)
+                print(f"🔇 Слушатель ушел (осталось: {len(clients)})")
+            return
+        
+        # Статус API
+        elif self.path == '/api/status':
+            import json
+            current_song = playlist[current_song_index] if playlist else None
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'status': 'online',
+                'current_song': current_song.name if current_song else 'None',
+                'listeners': len(clients),
+                'playlist_size': len(playlist),
+                'ip': PUBLIC_IP,
+                'port': PORT
+            }).encode())
+            return
+        
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-def start_stream():
-    """Запускает ffmpeg для стриминга в Icecast"""
-    global ffmpeg_process
-    
-    if not playlist:
-        print("❌ Нет песен для стриминга")
-        return
-    
-    song = playlist[current_song_index]
-    print(f"▶️ Начинаем стрим: {song.name}")
-    
-    cmd = [
-        'ffmpeg',
-        '-re', '-i', str(song),
-        '-c', 'copy',
-        '-f', 'mp3',
-        f'icecast://{ICECAST_SOURCE}@{ICECAST_URL}/stream'
-    ]
-    
-    ffmpeg_process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        preexec_fn=os.setsid if os.name != 'nt' else None
-    )
-    
-    # Планируем следующий трек
-    def schedule_next():
-        time.sleep(song_duration(song) + 1)
-        next_song()
-        start_stream()
-    
-    threading.Thread(target=schedule_next, daemon=True).start()
+def run_http_server():
+    server = HTTPServer(('0.0.0.0', PORT), RadioHandler)
+    print(f"✅ HTTP сервер запущен на порту {PORT}")
+    server.serve_forever()
 
-def song_duration(song_path):
-    try:
-        audio = MP3(song_path)
-        return int(audio.info.length)
-    except:
-        return 180  # 3 минуты по умолчанию
-
-def get_stats():
-    conn = sqlite3.connect('radio.db')
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM history")
-    total_played = c.fetchone()[0]
-    conn.close()
+# ==================== ФОНОВЫЙ СТРИМИНГ ====================
+def background_stream():
+    global current_song_data, current_song_position, clients, current_song_index, playlist
     
-    song = get_current_song()
-    return {
-        'current': song.stem if song else 'Нет',
-        'playlist_size': len(playlist),
-        'total_played': total_played,
-        'listeners': listeners
-    }
-
-# ==================== ПОЛУЧЕНИЕ ПУБЛИЧНОГО URL ====================
-def get_ngrok_url():
-    try:
-        import requests
-        resp = requests.get('http://localhost:4040/api/tunnels', timeout=3)
-        tunnels = resp.json().get('tunnels', [])
-        for tunnel in tunnels:
-            if tunnel.get('proto') == 'https':
-                return tunnel.get('public_url')
-    except:
-        pass
-    return None
-
-def update_public_url():
-    global PUBLIC_URL, STREAM_URL
-    PUBLIC_URL = get_ngrok_url()
-    if PUBLIC_URL:
-        STREAM_URL = f"{PUBLIC_URL}/stream"
-    else:
-        STREAM_URL = f"http://193.233.114.7:8000/stream"
-    return STREAM_URL
+    while True:
+        if not playlist:
+            time.sleep(5)
+            continue
+        
+        # Открываем файл если нужно
+        if not current_song_data:
+            current_song_data = open(playlist[current_song_index], 'rb')
+            current_song_position = 0
+            print(f"🎵 Начало: {playlist[current_song_index].name}")
+        
+        # Читаем кусок файла
+        current_song_data.seek(current_song_position)
+        chunk = current_song_data.read(8192)
+        
+        if chunk:
+            current_song_position += len(chunk)
+            # Отправляем всем клиентам
+            for client in clients[:]:
+                try:
+                    client.write(chunk)
+                    client.flush()
+                except:
+                    if client in clients:
+                        clients.remove(client)
+        else:
+            # Конец песни - переключаем
+            current_song_data.close()
+            current_song_data = None
+            current_song_index = (current_song_index + 1) % len(playlist)
+            print(f"⏭️ Следующий трек: {playlist[current_song_index].name}")
+        
+        time.sleep(0.05)  # 50ms задержка
 
 # ==================== TELEGRAM БОТ ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = get_stats()
-    stream_url = STREAM_URL or "http://193.233.114.7:8000/stream"
+async def start(update, context):
+    current_song = playlist[current_song_index] if playlist else None
     
     keyboard = [
-        [InlineKeyboardButton("🎵 СЛУШАТЬ РАДИО", url=stream_url)],
-        [InlineKeyboardButton("🌐 ICECAST ПЛЕЕР", url=stream_url.replace('/stream', ''))],
-        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
-        [InlineKeyboardButton("📤 ЗАГРУЗИТЬ ТРЕК", callback_data="upload")],
-        [InlineKeyboardButton("ℹ️ ПОМОЩЬ", callback_data="help")]
+        [InlineKeyboardButton("🎵 СЛУШАТЬ РАДИО", url=STREAM_URL)],
+        [InlineKeyboardButton("🌐 ВЕБ-ПЛЕЕР", url=f"http://{PUBLIC_IP}:{PORT}")],
+        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=STREAM_URL)],
+        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")]
     ]
     
     await update.message.reply_text(
-        f"🎵 *SUPER RADIO (ICEcast)*\n\n"
-        f"┌─ 🎤 Сейчас: `{stats['current']}`\n"
-        f"├─ 👥 Слушателей: {stats['listeners']}\n"
-        f"├─ 📀 Песен: {stats['playlist_size']}\n"
-        f"└─ 🎧 Всего сыграно: {stats['total_played']}\n\n"
-        f"🔗 *Ссылка для друзей:*\n`{stream_url}`\n\n"
-        f"💡 Просто отправьте эту ссылку друзьям —\n"
-        f"   она откроется в любом браузере или плеере!",
+        f"🎵 *Super Radio*\n\n"
+        f"┌─ 🎤 Сейчас: `{current_song.name if current_song else 'Нет песен'}`\n"
+        f"├─ 👥 Слушателей: {len(clients)}\n"
+        f"├─ 📀 Песен: {len(playlist)}\n"
+        f"└─ 🌍 Ваш IP: {PUBLIC_IP}\n\n"
+        f"🔗 *Ссылка для друзей:*\n"
+        f"`{STREAM_URL}`\n\n"
+        f"💡 Просто отправьте ссылку друзьям!\n"
+        f"Она работает в браузере и VLC",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_callback(update, context):
     query = update.callback_query
     await query.answer()
     
-    if query.data == "status":
-        stats = get_stats()
-        await query.edit_message_text(
-            f"📊 *СТАТУС РАДИО*\n\n"
-            f"┌─ 🎵 Сейчас: `{stats['current']}`\n"
-            f"├─ 👥 Слушателей: {stats['listeners']}\n"
-            f"├─ 📀 Плейлист: {stats['playlist_size']} песен\n"
-            f"├─ 🎧 Всего треков: {stats['total_played']}\n"
-            f"├─ 🎚️ Сервер: ✅ Активен\n"
-            f"└─ 🔊 Источник: Icecast v2.4\n\n"
-            f"🔗 Ссылка: `{STREAM_URL}`",
-            parse_mode='Markdown'
-        )
-    elif query.data == "upload":
-        await query.edit_message_text(
-            "📤 *ЗАГРУЗКА МУЗЫКИ*\n\n"
-            "1. Положите MP3 файлы в папку `music`\n"
-            "2. Или отправьте мне MP3 файл прямо сейчас\n\n"
-            "✅ Поддерживаются MP3 до 50MB\n"
-            "🎵 После добавления трек появится в плейлисте",
-            parse_mode='Markdown'
-        )
-    elif query.data == "help":
-        await query.edit_message_text(
-            f"🎵 *КАК СЛУШАТЬ РАДИО*\n\n"
-            f"📱 *В браузере:*\n"
-            f"   Просто откройте ссылку\n\n"
-            f"💻 *В VLC:*\n"
-            f"   Media → Open Network Stream\n"
-            f"   Вставьте: `{STREAM_URL}`\n\n"
-            f"📱 *В приложениях:*\n"
-            f"   Любой плеер с поддержкой Icecast\n\n"
-            f"🔥 *Технологии:* Icecast + FFmpeg",
-            parse_mode='Markdown'
-        )
+    current_song = playlist[current_song_index] if playlist else None
+    await query.edit_message_text(
+        f"📊 *Статус радио*\n\n"
+        f"┌─ 🎵 Сейчас: `{current_song.name if current_song else 'Нет'}`\n"
+        f"├─ 👥 Слушателей: {len(clients)}\n"
+        f"├─ 📀 Плейлист: {len(playlist)} песен\n"
+        f"├─ 🌍 Порт: {PORT}\n"
+        f"└─ 🎚️ Статус: ✅ Активен\n\n"
+        f"🔗 Ссылка: `{STREAM_URL}`",
+        parse_mode='Markdown'
+    )
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_audio(update, context):
     if update.message.audio:
         file = update.message.audio
         msg = await update.message.reply_text(f"📥 Загружаю {file.file_name}...")
         
-        try:
-            new_file = await context.bot.get_file(file.file_id)
-            file_path = Path(MUSIC_FOLDER) / file.file_name
-            await new_file.download_to_drive(file_path)
-            
-            # Обновляем плейлист
-            load_playlist()
-            
-            await msg.edit_text(
-                f"✅ *Трек добавлен!*\n\n"
-                f"📀 {file.file_name}\n"
-                f"📊 Всего песен: {len(playlist)}",
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            await msg.edit_text(f"❌ Ошибка: {str(e)}")
+        new_file = await context.bot.get_file(file.file_id)
+        file_path = Path(MUSIC_FOLDER) / file.file_name
+        await new_file.download_to_drive(file_path)
+        
+        load_playlist()
+        await msg.edit_text(f"✅ Добавлено! Всего песен: {len(playlist)}")
 
-async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def link_command(update, context):
     await update.message.reply_text(
-        f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
+        f"🔗 *Ссылка для друзей*\n\n"
         f"`{STREAM_URL}`\n\n"
-        f"📱 Отправьте эту ссылку друзьям,\n"
-        f"   чтобы они могли слушать радио!",
-        parse_mode='Markdown'
-    )
-
-async def now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = get_stats()
-    await update.message.reply_text(
-        f"🎵 *СЕЙЧАС В ЭФИРЕ*\n\n"
-        f"`{stats['current']}`\n\n"
-        f"👥 Слушателей: {stats['listeners']}\n"
-        f"📀 Плейлист: {stats['playlist_size']} песен",
+        f"📱 Отправьте эту ссылку - она работает как радио!",
         parse_mode='Markdown'
     )
 
 # ==================== ЗАПУСК ====================
 def main():
-    # Загружаем плейлист
+    # Загружаем музыку
     if load_playlist() == 0:
         print("\n⚠️ ВНИМАНИЕ: Нет музыкальных файлов!")
         print("📁 Положите MP3 файлы в папку 'music'")
         print("   Или отправьте их через Telegram бота\n")
     
-    # Запускаем стриминг
-    if playlist:
-        start_stream()
+    # Запускаем HTTP сервер в потоке
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
     
-    # Ждем Icecast и получаем URL
-    time.sleep(5)
-    update_public_url()
+    time.sleep(2)
+    
+    # Запускаем фоновый стриминг
+    stream_thread = threading.Thread(target=background_stream, daemon=True)
+    stream_thread.start()
     
     # Запускаем бота
-    application = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("link", link_command))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
+    app.add_handler(CallbackQueryHandler(status_callback, pattern="status"))
     
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("link", link_command))
-    application.add_handler(CommandHandler("now", now_command))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
-    
-    print("\n" + "=" * 60)
-    print("🎵 SUPER RADIO BOT v3.0 (Icecast)")
-    print("=" * 60)
+    print("\n" + "=" * 50)
+    print("🎵 SUPER RADIO ЗАПУЩЕН")
+    print("=" * 50)
     print(f"\n🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ:")
     print(f"   {STREAM_URL}")
-    print(f"\n🌐 ВЕБ-ПЛЕЕР ICECAST:")
-    print(f"   {STREAM_URL.replace('/stream', '')}")
-    print(f"\n📊 АДМИН-ПАНЕЛЬ ICECAST:")
-    print(f"   http://localhost:8000/admin")
-    print(f"   Логин: admin | Пароль: adminpass")
-    print(f"\n🎧 БОТ АКТИВЕН в Telegram")
-    print("=" * 60 + "\n")
+    print(f"\n🌐 ВЕБ-ПЛЕЕР:")
+    print(f"   http://{PUBLIC_IP}:{PORT}")
+    print(f"\n📊 API СТАТУСА:")
+    print(f"   http://{PUBLIC_IP}:{PORT}/api/status")
+    print("\n🤖 БОТ АКТИВЕН в Telegram")
+    print("=" * 50 + "\n")
     
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
