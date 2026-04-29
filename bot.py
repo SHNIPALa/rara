@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - Встроенный туннель и веб-плеер
+SUPER RADIO BOT - с автоматическим открытием порта через UPnP
 """
 
 import os
@@ -18,7 +18,6 @@ from mutagen.mp3 import MP3
 
 # ==================== КОНФИГУРАЦИЯ ====================
 PORT = 8080
-TUNNEL_PORT = 8081  # Порт для туннеля
 MUSIC_FOLDER = "music"
 TOKEN = "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q"
 
@@ -31,18 +30,70 @@ current_song_index = 0
 current_song_data = None
 current_song_position = 0
 clients = []
-tunnel_url = None
 public_ip = None
+port_opened = False
 
-# ==================== ОПРЕДЕЛЕНИЕ IP ====================
-def get_public_ip():
-    """Получение внешнего IP"""
+# ==================== UPnP ПОРТ-ФОРВАРДИНГ ====================
+def setup_upnp_port_forwarding():
+    """Автоматическое открытие порта через UPnP"""
+    global port_opened, public_ip
+    
     try:
-        ip = requests.get('https://api.ipify.org', timeout=3).text.strip()
+        import miniupnpc
+        
+        upnp = miniupnpc.UPnP()
+        upnp.discoverdelay = 200
+        upnp.discover()
+        upnp.selectigd()
+        
+        # Получаем внешний IP
+        public_ip = upnp.externalipaddress()
+        print(f"🌍 Внешний IP (через UPnP): {public_ip}")
+        
+        # Проверяем, не открыт ли уже порт
+        existing = upnp.getspecificportmapping(PORT, 'TCP')
+        if existing:
+            print(f"⚠️ Порт {PORT} уже открыт для {existing}")
+            port_opened = True
+            return True
+        
+        # Открываем порт
+        result = upnp.addportmapping(
+            PORT,                   # внешний порт
+            'TCP',                  # протокол
+            upnp.lanaddr,           # внутренний IP
+            PORT,                   # внутренний порт
+            f'Super Radio Bot Port {PORT}',  # описание
+            ''
+        )
+        
+        if result:
+            port_opened = True
+            print(f"✅ Порт {PORT} успешно открыт через UPnP!")
+            print(f"   Внутренний IP: {upnp.lanaddr}")
+            print(f"   Внешний IP: {public_ip}")
+            return True
+        else:
+            print(f"❌ Не удалось открыть порт {PORT} через UPnP")
+            return False
+            
+    except ImportError:
+        print("⚠️ Библиотека miniupnpc не установлена")
+        print("   Установите: pip install miniupnpc")
+        return False
+    except Exception as e:
+        print(f"❌ Ошибка UPnP: {e}")
+        print("   Возможно, UPnP отключен в настройках роутера")
+        return False
+
+def get_public_ip_fallback():
+    """Получение внешнего IP через API (если UPnP не сработал)"""
+    try:
+        ip = requests.get('https://api.ipify.org', timeout=5).text.strip()
         return ip
     except:
         try:
-            ip = requests.get('https://icanhazip.com', timeout=3).text.strip()
+            ip = requests.get('https://icanhazip.com', timeout=5).text.strip()
             return ip
         except:
             return None
@@ -147,7 +198,6 @@ class RadioHandler(BaseHTTPRequestHandler):
             width: 100%;
             text-align: center;
             box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3);
-            backdrop-filter: blur(10px);
             transition: transform 0.3s;
         }}
         
@@ -331,7 +381,8 @@ class RadioHandler(BaseHTTPRequestHandler):
                 'current_song': info['title'],
                 'listeners': len(clients),
                 'playlist_size': len(playlist),
-                'port': PORT
+                'port': PORT,
+                'port_opened': port_opened
             }).encode())
             return
         
@@ -374,57 +425,20 @@ def background_stream():
         
         time.sleep(0.05)
 
-# ==================== СВОЙ ТУННЕЛЬ (альтернатива LocalTunnel) ====================
-class TunnelHandler(BaseHTTPRequestHandler):
-    """Прокси для перенаправления трафика"""
-    
-    def log_message(self, format, *args):
-        pass
-    
-    def do_GET(self):
-        try:
-            # Перенаправляем запрос на локальный радио сервер
-            resp = requests.get(f'http://localhost:{PORT}{self.path}', stream=True)
-            self.send_response(resp.status_code)
-            for header, value in resp.headers.items():
-                if header.lower() not in ['transfer-encoding', 'content-length']:
-                    self.send_header(header, value)
-            self.end_headers()
-            
-            if resp.status_code == 200:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    self.wfile.write(chunk)
-        except:
-            self.send_response(502)
-            self.end_headers()
-
-def run_tunnel():
-    """Запуск простого туннеля на другом порту"""
-    server = HTTPServer(('0.0.0.0', TUNNEL_PORT), TunnelHandler)
-    print(f"✅ Туннель: http://0.0.0.0:{TUNNEL_PORT}")
-    server.serve_forever()
-
 # ==================== TELEGRAM БОТ ====================
 async def start(update, context):
-    global tunnel_url, public_ip
+    global public_ip
     
-    # Определяем IP для ссылки
-    if not public_ip:
-        public_ip = get_public_ip()
-    
-    if public_ip:
-        main_url = f"http://{public_ip}:{PORT}"
-        tunnel_url = f"http://{public_ip}:{TUNNEL_PORT}"
-    else:
-        main_url = f"http://localhost:{PORT}"
-        tunnel_url = f"http://localhost:{TUNNEL_PORT}"
-    
+    base_url = f"http://{public_ip}:{PORT}" if public_ip else f"http://localhost:{PORT}"
     info = get_song_info()
     
+    status_text = "✅ ПОРТ ОТКРЫТ" if port_opened else "⚠️ ПОРТ НЕ ОТКРЫТ"
+    if not port_opened:
+        status_text += "\n   UPnP отключен или не поддерживается"
+    
     keyboard = [
-        [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=main_url)],
-        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=f"{main_url}/radio.mp3")],
-        [InlineKeyboardButton("🔄 АЛЬТЕРНАТИВНЫЙ ПОРТ", url=tunnel_url)],
+        [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=base_url)],
+        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=f"{base_url}/radio.mp3")],
         [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
         [InlineKeyboardButton("📤 ДОБАВИТЬ ТРЕК", callback_data="upload")]
     ]
@@ -434,9 +448,10 @@ async def start(update, context):
         f"┌─ 🎤 `{info['title']}`\n"
         f"├─ 👥 {len(clients)} слушателей\n"
         f"├─ 📀 {len(playlist)} песен\n"
-        f"└─ 🌍 Порт: {PORT}\n\n"
-        f"🔗 *Главная ссылка:*\n`{main_url}`\n\n"
-        f"🔄 *Запасной порт:*\n`{tunnel_url}`\n\n"
+        f"├─ 🌍 IP: `{public_ip}`\n"
+        f"├─ 🔌 Порт: {PORT}\n"
+        f"└─ 🔓 {status_text}\n\n"
+        f"🔗 *Ссылка:*\n`{base_url}`\n\n"
         f"💡 Отправьте ссылку друзьям - откроется плеер!",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -448,14 +463,18 @@ async def callback_handler(update, context):
     
     if query.data == "status":
         info = get_song_info()
+        base_url = f"http://{public_ip}:{PORT}" if public_ip else f"http://localhost:{PORT}"
         await query.edit_message_text(
             f"📊 *СТАТУС РАДИО*\n\n"
             f"🎵 Сейчас: `{info['title']}`\n"
             f"⏱️ Длительность: {info['duration']}\n"
             f"👥 Слушателей: {len(clients)}\n"
             f"📀 Песен: {len(playlist)}\n"
-            f"✅ Сервер: Активен\n\n"
-            f"🔗 Ссылка: http://{public_ip}:{PORT}/radio.mp3" if public_ip else "Локальный доступ",
+            f"🌍 Внешний IP: `{public_ip}`\n"
+            f"🔌 Порт: {PORT}\n"
+            f"🔓 UPnP: {'✅ Активен' if port_opened else '❌ Неактивен'}\n"
+            f"🎚️ Сервер: ✅ Работает\n\n"
+            f"🔗 Ссылка: `{base_url}`",
             parse_mode='Markdown'
         )
     elif query.data == "upload":
@@ -490,56 +509,57 @@ async def handle_audio(update, context):
             await msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 async def link_command(update, context):
-    if public_ip:
-        main_url = f"http://{public_ip}:{PORT}"
-        await update.message.reply_text(
-            f"🔗 *ССЫЛКИ ДЛЯ ДРУЗЕЙ*\n\n"
-            f"🎵 *Веб-плеер:*\n`{main_url}`\n\n"
-            f"📥 *Прямой поток:*\n`{main_url}/radio.mp3`\n\n"
-            f"🔄 *Запасной порт:*\n`http://{public_ip}:{TUNNEL_PORT}`\n\n"
-            f"💡 Откройте в браузере или VLC",
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            f"🔗 *ЛОКАЛЬНАЯ ССЫЛКА*\n\n"
-            f"http://localhost:{PORT}\n\n"
-            f"⚠️ Вы в локальной сети, используйте ngrok",
-            parse_mode='Markdown'
-        )
+    base_url = f"http://{public_ip}:{PORT}" if public_ip else f"http://localhost:{PORT}"
+    await update.message.reply_text(
+        f"🔗 *ССЫЛКИ ДЛЯ ДРУЗЕЙ*\n\n"
+        f"🎵 *Веб-плеер:*\n`{base_url}`\n\n"
+        f"📥 *Прямой поток:*\n`{base_url}/radio.mp3`\n\n"
+        f"💡 Откройте в браузере или VLC",
+        parse_mode='Markdown'
+    )
 
 # ==================== ЗАПУСК ====================
 def main():
-    global public_ip
+    global public_ip, port_opened
     
     print("\n" + "=" * 50)
-    print("🎵 SUPER RADIO BOT")
+    print("🎵 SUPER RADIO BOT v3.0")
     print("=" * 50)
     
-    # Получаем внешний IP
-    public_ip = get_public_ip()
+    # Пытаемся открыть порт через UPnP
+    print("\n🔄 Настройка UPnP порт-форвардинга...")
+    setup_upnp_port_forwarding()
     
-    if public_ip:
-        print(f"🌍 ВНЕШНИЙ IP: {public_ip}")
-        print(f"🔗 ВЕБ-ПЛЕЕР: http://{public_ip}:{PORT}")
-        print(f"📡 ПОТОК: http://{public_ip}:{PORT}/radio.mp3")
-        print(f"🔄 ЗАПАСНОЙ ПОРТ: http://{public_ip}:{TUNNEL_PORT}")
+    # Если UPnP не сработал, пробуем получить IP через API
+    if not public_ip:
+        public_ip = get_public_ip_fallback()
+        if public_ip:
+            print(f"🌍 Внешний IP (через API): {public_ip}")
+        else:
+            print("⚠️ Не удалось определить внешний IP")
+            public_ip = "localhost"
+    
+    if port_opened:
+        print(f"\n✅ ПОРТ {PORT} УСПЕШНО ОТКРЫТ!")
     else:
-        print("⚠️ НЕ УДАЛОСЬ ОПРЕДЕЛИТЬ ВНЕШНИЙ IP")
-        print("🔗 ЛОКАЛЬНЫЙ ДОСТУП: http://localhost:{PORT}")
+        print(f"\n⚠️ ПОРТ {PORT} НЕ ОТКРЫТ АВТОМАТИЧЕСКИ")
+        print("   Возможные решения:")
+        print("   1. Включите UPnP в настройках роутера")
+        print("   2. Откройте порт вручную")
+        print("   3. Используйте ngrok: https://ngrok.com")
     
+    print(f"\n🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ:")
+    print(f"   http://{public_ip}:{PORT}")
+    print(f"\n📡 ПРЯМОЙ ПОТОК:")
+    print(f"   http://{public_ip}:{PORT}/radio.mp3")
     print("=" * 50 + "\n")
     
     # Загружаем плейлист
     load_playlist()
     
-    # Запускаем основной радио сервер
+    # Запускаем радио сервер
     radio_thread = threading.Thread(target=run_radio_server, daemon=True)
     radio_thread.start()
-    
-    # Запускаем туннель на другом порту
-    tunnel_thread = threading.Thread(target=run_tunnel, daemon=True)
-    tunnel_thread.start()
     
     time.sleep(2)
     
