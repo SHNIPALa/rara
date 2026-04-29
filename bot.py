@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""
-SUPER RADIO - Автономная версия с bore туннелем
-"""
-
 import os
 import time
 import threading
-import subprocess
 import random
 import json
-import requests
-import signal
+import subprocess
+import re
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from mutagen.mp3 import MP3
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# Конфигурация
 PORT = 8080
 MUSIC_FOLDER = "music"
 TOKEN = "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q"
@@ -31,44 +26,66 @@ current_song_data = None
 current_song_position = 0
 clients = []
 public_url = None
-bore_process = None
+tunnel_process = None
 
-# ==================== BORE ТУННЕЛЬ ====================
-def start_bore_tunnel():
-    """Запуск bore туннеля и получение URL"""
-    global bore_process, public_url
+# ==================== ЗАПУСК ТУННЕЛЯ ====================
+def start_tunnel():
+    """Запуск SSH туннеля через pinggy.io"""
+    global public_url, tunnel_process
     
+    # Пробуем pinggy (работает через порт 443)
     try:
-        # Запускаем bore в фоне
-        bore_process = subprocess.Popen(
-            ['bore', 'local', str(PORT), '--to', 'bore.pub'],
+        print("🔄 Запуск туннеля через pinggy.io...")
+        tunnel_process = subprocess.Popen(
+            ['ssh', '-p', '443', '-R0:localhost:8080', 'a.pinggy.io'],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
         )
         
-        # Ждём и читаем вывод для получения порта
-        for i in range(30):
-            if bore_process.stdout:
-                line = bore_process.stdout.readline()
-                print(f"Bore: {line.strip()}")
-                # Ищем listening at bore.pub:xxxxx
-                import re
-                match = re.search(r'bore\.pub:(\d+)', line)
+        # Ждём получения URL
+        for i in range(20):
+            if tunnel_process.stdout:
+                line = tunnel_process.stdout.readline()
+                print(f"Tunnel: {line.strip()}")
+                # Ищем URL вида https://xxxxxx.a.pinggy.link
+                match = re.search(r'https://[a-z0-9]+\.a\.pinggy\.link', line)
                 if match:
-                    port = match.group(1)
-                    public_url = f"https://bore.pub:{port}"
+                    public_url = match.group(0)
                     print(f"\n✅ ТУННЕЛЬ СОЗДАН!")
                     print(f"🔗 ПУБЛИЧНАЯ ССЫЛКА: {public_url}")
                     return True
             time.sleep(1)
-        
-        print("⚠️ Не удалось получить URL от bore")
-        return False
-        
     except Exception as e:
-        print(f"❌ Ошибка bore: {e}")
-        return False
+        print(f"Ошибка pinggy: {e}")
+    
+    # Запасной вариант: localhost.run
+    try:
+        print("🔄 Пробуем localhost.run...")
+        tunnel_process = subprocess.Popen(
+            ['ssh', '-R', '80:localhost:8080', 'localhost.run'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        
+        for i in range(20):
+            if tunnel_process.stdout:
+                line = tunnel_process.stdout.readline()
+                print(f"Tunnel: {line.strip()}")
+                # Ищем URL
+                match = re.search(r'https://[a-z0-9\-]+\.loca\.lt', line)
+                if match:
+                    public_url = match.group(0)
+                    print(f"\n✅ ТУННЕЛЬ СОЗДАН!")
+                    print(f"🔗 ПУБЛИЧНАЯ ССЫЛКА: {public_url}")
+                    return True
+            time.sleep(1)
+    except Exception as e:
+        print(f"Ошибка localhost.run: {e}")
+    
+    print("⚠️ Не удалось создать туннель")
+    return False
 
 # ==================== ЗАГРУЗКА ПЛЕЙЛИСТА ====================
 def load_playlist():
@@ -77,11 +94,8 @@ def load_playlist():
     if playlist:
         random.shuffle(playlist)
         print(f"📀 Загружено {len(playlist)} песен")
-        for i, song in enumerate(playlist[:5]):
-            print(f"   {i+1}. {song.name}")
     else:
         print(f"⚠️ НЕТ MP3! Положите файлы в папку 'music'")
-    return len(playlist)
 
 def next_song():
     global current_song_index, current_song_data, current_song_position
@@ -100,10 +114,7 @@ def get_song_info():
         try:
             audio = MP3(song)
             duration = int(audio.info.length)
-            return {
-                'title': song.stem,
-                'duration': f"{duration//60}:{duration%60:02d}"
-            }
+            return {'title': song.stem, 'duration': f"{duration//60}:{duration%60:02d}"}
         except:
             return {'title': song.stem, 'duration': '0:00'}
     return {'title': 'Нет песен', 'duration': '0:00'}
@@ -140,95 +151,56 @@ class RadioHandler(BaseHTTPRequestHandler):
         
         elif self.path == '/':
             info = get_song_info()
-            stream_url = f"{public_url}/radio.mp3" if public_url else f"http://localhost:{PORT}/radio.mp3"
             web_url = public_url if public_url else f"http://localhost:{PORT}"
             
             html = f'''<!DOCTYPE html>
-<html lang="ru">
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>🎵 Super Radio</title>
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
+        body{{
+            font-family:'Segoe UI',sans-serif;
+            background:linear-gradient(135deg,#667eea,#764ba2);
+            min-height:100vh;
+            display:flex;
+            justify-content:center;
+            align-items:center;
+            margin:0;
+            padding:20px;
         }}
-        .player {{
-            background: rgba(255,255,255,0.95);
-            border-radius: 30px;
-            padding: 40px;
-            max-width: 500px;
-            width: 100%;
-            text-align: center;
-            box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+        .player{{
+            background:rgba(255,255,255,0.95);
+            border-radius:30px;
+            padding:40px;
+            max-width:500px;
+            width:100%;
+            text-align:center;
         }}
-        h1 {{ color: #764ba2; margin-bottom: 10px; }}
-        .status {{ color: #4caf50; font-weight: bold; margin-bottom: 20px; animation: pulse 2s infinite; }}
-        @keyframes pulse {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.6; }} 100% {{ opacity: 1; }} }}
-        audio {{ width: 100%; margin: 20px 0; border-radius: 30px; }}
-        .info {{
-            background: linear-gradient(135deg, #f5f5f5, #e8e8e8);
-            padding: 15px;
-            border-radius: 15px;
-            margin: 20px 0;
-        }}
-        .song-title {{ font-size: 1.2em; font-weight: bold; color: #764ba2; margin-bottom: 8px; }}
-        .stats {{ display: flex; justify-content: space-around; color: #666; }}
-        .url {{
-            background: #f0f0f0;
-            padding: 12px;
-            border-radius: 10px;
-            font-size: 11px;
-            word-break: break-all;
-            margin-top: 15px;
-        }}
-        button {{
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 30px;
-            cursor: pointer;
-            margin: 5px;
-        }}
-        footer {{ margin-top: 20px; font-size: 11px; color: #999; }}
-        .live {{ background: #ff4444; color: white; padding: 2px 8px; border-radius: 10px; font-size: 10px; margin-left: 5px; animation: pulse 1s infinite; display: inline-block; }}
+        h1{{color:#764ba2;}}
+        audio{{width:100%;margin:20px 0;}}
+        .info{{background:#f0f0f0;padding:15px;border-radius:15px;margin:20px 0;}}
+        .url{{background:#e0e0e0;padding:12px;border-radius:10px;font-size:11px;word-break:break-all;}}
+        button{{background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;padding:12px 24px;border-radius:30px;cursor:pointer;margin:5px;}}
     </style>
 </head>
 <body>
     <div class="player">
         <h1>🎵 Super Radio</h1>
-        <div class="status">🟢 LIVE <span class="live">LIVE</span></div>
         <audio controls autoplay><source src="/radio.mp3" type="audio/mpeg"></audio>
         <div class="info">
-            <div class="song-title">🎤 {info['title']}</div>
-            <div class="stats">
-                <span>⏱️ {info['duration']}</span>
-                <span>👥 {len(clients)} слушателей</span>
-                <span>📀 {len(playlist)} песен</span>
-            </div>
+            🎤 {info['title']}<br>
+            👥 {len(clients)} слушателей | 📀 {len(playlist)} песен
         </div>
-        <div class="url">🔗 <a href="{stream_url}">{stream_url}</a></div>
-        <button onclick="window.location.href='/radio.mp3'">📥 Скачать поток</button>
-        <footer>💡 Вставьте ссылку в VLC: Media → Open Network Stream</footer>
+        <div class="url">🔗 {web_url}</div>
+        <button onclick="window.location.href='/radio.mp3'">📥 Скачать</button>
     </div>
     <script>
-        setInterval(async () => {{
-            try {{
-                const res = await fetch('/status');
-                const data = await res.json();
-                document.querySelector('.song-title').innerHTML = `🎤 ${{data.current_song}}`;
-                const stats = document.querySelector('.stats');
-                if (stats) stats.innerHTML = `<span>👥 ${{data.listeners}} слушателей</span><span>📀 ${{data.playlist_size}} песен</span>`;
-            }} catch(e) {{}}
-        }}, 5000);
+        setInterval(async()=>{{
+            const res=await fetch('/status');
+            const d=await res.json();
+            document.querySelector('.info').innerHTML=`🎤 ${{d.current_song}}<br>👥 ${{d.listeners}} слушателей | 📀 ${{d.playlist_size}} песен`;
+        }},5000);
     </script>
 </body>
 </html>'''
@@ -242,7 +214,6 @@ class RadioHandler(BaseHTTPRequestHandler):
             info = get_song_info()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'current_song': info['title'],
@@ -260,7 +231,7 @@ def run_server():
     print(f"✅ Радио сервер: http://localhost:{PORT}")
     server.serve_forever()
 
-# ==================== ФОНОВЫЙ СТРИМИНГ ====================
+# ==================== СТРИМИНГ ====================
 def background_stream():
     global current_song_data, current_song_position, clients
     
@@ -294,23 +265,21 @@ def background_stream():
 async def start(update, context):
     info = get_song_info()
     web_url = public_url if public_url else f"http://localhost:{PORT}"
-    stream_url = f"{web_url}/radio.mp3"
     
     keyboard = [
         [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
-        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=stream_url)],
+        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=f"{web_url}/radio.mp3")],
         [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
         [InlineKeyboardButton("📤 ДОБАВИТЬ ТРЕК", callback_data="upload")]
     ]
     
     await update.message.reply_text(
         f"🎵 *SUPER RADIO*\n\n"
-        f"┌─ 🎤 `{info['title']}`\n"
-        f"├─ 👥 {len(clients)} слушателей\n"
-        f"├─ 📀 {len(playlist)} песен\n"
-        f"└─ 🌍 {web_url}\n\n"
+        f"🎤 `{info['title']}`\n"
+        f"👥 {len(clients)} слушателей\n"
+        f"📀 {len(playlist)} песен\n\n"
         f"🔗 *Ссылка для друзей:*\n`{web_url}`\n\n"
-        f"💡 Отправьте ссылку друзьям - откроется плеер!",
+        f"💡 Отправьте ссылку друзьям!",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -321,24 +290,16 @@ async def callback_handler(update, context):
     
     if query.data == "status":
         info = get_song_info()
-        web_url = public_url if public_url else f"http://localhost:{PORT}"
         await query.edit_message_text(
-            f"📊 *СТАТУС РАДИО*\n\n"
-            f"🎵 Сейчас: `{info['title']}`\n"
-            f"⏱️ Длительность: {info['duration']}\n"
-            f"👥 Слушателей: {len(clients)}\n"
-            f"📀 Песен: {len(playlist)}\n"
-            f"🔗 Ссылка: `{web_url}`\n"
-            f"🎚️ Сервер: ✅ Активен",
+            f"📊 *СТАТУС*\n\n"
+            f"🎵 {info['title']}\n"
+            f"👥 {len(clients)} слушателей\n"
+            f"📀 {len(playlist)} песен",
             parse_mode='Markdown'
         )
     elif query.data == "upload":
         await query.edit_message_text(
-            "📤 *ЗАГРУЗКА МУЗЫКИ*\n\n"
-            "1. Положите MP3 в папку `music`\n"
-            "2. Или отправьте MP3 файл прямо сейчас\n\n"
-            "✅ Поддерживаются MP3 до 50MB\n"
-            "🎵 После загрузки трек появится в плейлисте",
+            "📤 Отправьте MP3 файл!\n\n✅ MP3 до 50MB",
             parse_mode='Markdown'
         )
 
@@ -356,55 +317,39 @@ async def handle_audio(update, context):
         except Exception as e:
             await msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-async def link_command(update, context):
-    web_url = public_url if public_url else f"http://localhost:{PORT}"
-    await update.message.reply_text(
-        f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
-        f"`{web_url}`\n\n"
-        f"📱 Отправьте эту ссылку друзьям,\n"
-        f"   чтобы они могли слушать радио!",
-        parse_mode='Markdown'
-    )
-
 # ==================== ЗАПУСК ====================
 def main():
     global public_url
     
     print("\n" + "=" * 50)
-    print("🎵 SUPER RADIO BOT")
+    print("🎵 SUPER RADIO")
     print("=" * 50)
     
-    # Загружаем плейлист
     load_playlist()
     
-    # Запускаем радио сервер
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    
+    # Запуск сервера
+    threading.Thread(target=run_server, daemon=True).start()
     time.sleep(2)
+    threading.Thread(target=background_stream, daemon=True).start()
     
-    # Запускаем стриминг
-    stream_thread = threading.Thread(target=background_stream, daemon=True)
-    stream_thread.start()
+    # Запуск туннеля
+    threading.Thread(target=start_tunnel, daemon=True).start()
     
-    # Запускаем bore туннель
-    print("\n🔄 Запуск bore туннеля...")
-    start_bore_tunnel()
-    
-    # Запускаем бота
+    # Запуск бота
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     
+    print("\n🔄 Очистка вебхука...")
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(app.bot.delete_webhook())
+    
     print("\n✅ Бот запущен!")
-    print("=" * 50)
-    print("\n🔗 ДЛЯ ДРУЗЕЙ:")
     if public_url:
-        print(f"   {public_url}")
+        print(f"🔗 Ссылка для друзей: {public_url}")
     else:
-        print("   Ссылка появится через несколько секунд...")
+        print("⏳ Ссылка появится через 10-20 секунд...")
     print("\n" + "=" * 50 + "\n")
     
     app.run_polling()
