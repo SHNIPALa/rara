@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - Синхронная версия
+SUPER RADIO BOT - с альтернативными туннелями
 """
 
 import os
@@ -10,6 +10,7 @@ import random
 import json
 import subprocess
 import re
+import urllib.request
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,40 +33,189 @@ clients = []
 public_url = None
 tunnel_ready = False
 
-# ==================== ЗАПУСК ТУННЕЛЯ ====================
-def start_tunnel():
-    """Запуск SSH туннеля через pinggy.io"""
+# ==================== АЛЬТЕРНАТИВНЫЕ ТУННЕЛИ ====================
+
+def start_bore_tunnel():
+    """Bore - простой туннель на Rust"""
     global public_url, tunnel_ready
     
     try:
-        print("🔄 Запуск туннеля через pinggy.io...")
+        # Проверяем наличие bore
+        result = subprocess.run(['which', 'bore'], capture_output=True)
+        if result.returncode != 0:
+            print("  Bore не установлен, пропускаем...")
+            return False
+        
+        print("🔄 Запуск Bore туннеля...")
         process = subprocess.Popen(
-            ['ssh', '-p', '443', '-R0:localhost:8080', 'a.pinggy.io'],
+            ['bore', 'local', str(PORT), '--to', 'bore.pub'],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1
         )
         
-        # Ждём URL
-        for i in range(60):
+        for i in range(30):
             if process.stdout:
                 try:
                     line = process.stdout.readline()
                     if line:
                         print(f"  {line.strip()}")
-                        match = re.search(r'https://[a-z0-9]+\.a\.pinggy\.link', line)
+                        match = re.search(r'bore\.pub:(\d+)', line)
                         if match:
-                            public_url = match.group(0)
+                            port = match.group(1)
+                            public_url = f"https://bore.pub:{port}"
                             tunnel_ready = True
-                            print(f"\n✅ ТУННЕЛЬ СОЗДАН!")
-                            print(f"🔗 ПУБЛИЧНАЯ ССЫЛКА: {public_url}")
+                            print(f"\n✅ BORE ТУННЕЛЬ: {public_url}")
                             return True
                 except:
                     pass
             time.sleep(1)
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка Bore: {e}")
+    return False
+
+def start_cloudflare_tunnel():
+    """Cloudflare Tunnel (требует установки cloudflared)"""
+    global public_url, tunnel_ready
+    
+    try:
+        result = subprocess.run(['which', 'cloudflared'], capture_output=True)
+        if result.returncode != 0:
+            print("  cloudflared не установлен, пропускаем...")
+            return False
+        
+        print("🔄 Запуск Cloudflare Tunnel...")
+        process = subprocess.Popen(
+            ['cloudflared', 'tunnel', '--url', f'http://localhost:{PORT}'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        for i in range(40):
+            if process.stdout:
+                try:
+                    line = process.stdout.readline()
+                    if line:
+                        print(f"  {line.strip()}")
+                        match = re.search(r'https://[a-z0-9\-]+\.trycloudflare\.com', line)
+                        if match:
+                            public_url = match.group(0)
+                            tunnel_ready = True
+                            print(f"\n✅ CLOUDFLARE ТУННЕЛЬ: {public_url}")
+                            return True
+                except:
+                    pass
+            time.sleep(1)
+    except Exception as e:
+        print(f"Ошибка Cloudflare: {e}")
+    return False
+
+def start_localtunnel():
+    """LocalTunnel через npx"""
+    global public_url, tunnel_ready
+    
+    try:
+        result = subprocess.run(['which', 'npx'], capture_output=True)
+        if result.returncode != 0:
+            print("  npx не установлен, пропускаем...")
+            return False
+        
+        print("🔄 Запуск LocalTunnel...")
+        process = subprocess.Popen(
+            ['npx', 'localtunnel', '--port', str(PORT)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        for i in range(40):
+            if process.stdout:
+                try:
+                    line = process.stdout.readline()
+                    if line:
+                        print(f"  {line.strip()}")
+                        match = re.search(r'https://[a-z0-9\-]+\.loca\.lt', line)
+                        if match:
+                            public_url = match.group(0)
+                            tunnel_ready = True
+                            print(f"\n✅ LOCALTUNNEL: {public_url}")
+                            return True
+                except:
+                    pass
+            time.sleep(1)
+    except Exception as e:
+        print(f"Ошибка LocalTunnel: {e}")
+    return False
+
+def start_ssh_tunnel():
+    """SSH туннель с отключенной проверкой хоста"""
+    global public_url, tunnel_ready
+    
+    commands = [
+        (['ssh', '-o', 'StrictHostKeyChecking=no', '-p', '443', '-R0:localhost:8080', 'a.pinggy.io'],
+         r'https://[a-z0-9]+\.a\.pinggy\.link'),
+        (['ssh', '-o', 'StrictHostKeyChecking=no', '-R', '80:localhost:8080', 'localhost.run'],
+         r'https://[a-z0-9\-]+\.loca\.lt'),
+        (['ssh', '-o', 'StrictHostKeyChecking=no', '-R', '80:localhost:8080', 'serveo.net'],
+         r'https://[a-z0-9\-]+\.serveo\.net')
+    ]
+    
+    for cmd, pattern in commands:
+        try:
+            print(f"🔄 Запуск: {cmd[0]}...")
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            for i in range(30):
+                if process.stdout:
+                    try:
+                        line = process.stdout.readline()
+                        if line:
+                            print(f"  {line.strip()}")
+                            match = re.search(pattern, line)
+                            if match:
+                                public_url = match.group(0)
+                                tunnel_ready = True
+                                print(f"\n✅ SSH ТУННЕЛЬ: {public_url}")
+                                return True
+                    except:
+                        pass
+                time.sleep(1)
+            
+            process.terminate()
+        except Exception as e:
+            print(f"Ошибка: {e}")
+            continue
+    
+    return False
+
+def start_tunnel():
+    """Пробуем все варианты туннелей по очереди"""
+    
+    # Сначала пробуем Bore (не требует SSH)
+    if start_bore_tunnel():
+        return True
+    
+    # Потом LocalTunnel (через npx)
+    if start_localtunnel():
+        return True
+    
+    # Потом SSH туннели
+    if start_ssh_tunnel():
+        return True
+    
+    # В конце Cloudflare
+    if start_cloudflare_tunnel():
+        return True
     
     print("⚠️ Не удалось создать туннель")
     return False
@@ -77,6 +227,8 @@ def load_playlist():
     if playlist:
         random.shuffle(playlist)
         print(f"📀 Загружено {len(playlist)} песен")
+        for i, song in enumerate(playlist[:5]):
+            print(f"   {i+1}. {song.name}")
     else:
         print(f"⚠️ НЕТ MP3! Положите файлы в папку 'music'")
 
@@ -144,6 +296,7 @@ class RadioHandler(BaseHTTPRequestHandler):
 <head>
     <meta charset="UTF-8">
     <title>🎵 Super Radio</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body{{
             font-family:'Segoe UI',sans-serif;
@@ -248,7 +401,7 @@ def background_stream():
         time.sleep(0.05)
 
 # ==================== TELEGRAM БОТ ====================
-def start_command(update: Update, context):
+def start_command(update, context):
     global tunnel_ready, public_url
     
     if not tunnel_ready or not public_url:
@@ -266,8 +419,7 @@ def start_command(update: Update, context):
     keyboard = [
         [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
         [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=f"{web_url}/radio.mp3")],
-        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
-        [InlineKeyboardButton("📤 ДОБАВИТЬ ТРЕК", callback_data="upload")]
+        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")]
     ]
     
     update.message.reply_text(
@@ -281,7 +433,7 @@ def start_command(update: Update, context):
         parse_mode='Markdown'
     )
 
-def callback_handler(update: Update, context):
+def callback_handler(update, context):
     query = update.callback_query
     query.answer()
     
@@ -296,15 +448,8 @@ def callback_handler(update: Update, context):
             f"🔗 Ссылка: `{web_url}`",
             parse_mode='Markdown'
         )
-    elif query.data == "upload":
-        query.edit_message_text(
-            "📤 *ЗАГРУЗКА МУЗЫКИ*\n\n"
-            "Отправьте MP3 файл боту, и он добавится в плейлист!\n\n"
-            "✅ Поддерживаются MP3 до 50MB",
-            parse_mode='Markdown'
-        )
 
-def handle_audio(update: Update, context):
+def handle_audio(update, context):
     if update.message.audio:
         file = update.message.audio
         msg = update.message.reply_text(f"📥 Загружаю {file.file_name}...")
@@ -318,19 +463,6 @@ def handle_audio(update: Update, context):
         except Exception as e:
             msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-def link_command(update: Update, context):
-    if not tunnel_ready or not public_url:
-        update.message.reply_text("⏳ Туннель ещё создаётся, подождите 30 секунд...")
-        return
-    
-    update.message.reply_text(
-        f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
-        f"`{public_url}`\n\n"
-        f"📱 Отправьте эту ссылку друзьям!\n"
-        f"🎵 Она работает в браузере как плеер",
-        parse_mode='Markdown'
-    )
-
 # ==================== ЗАПУСК ====================
 def main():
     global tunnel_ready, public_url
@@ -342,23 +474,22 @@ def main():
     # Загружаем плейлист
     load_playlist()
     
-    # Запускаем радио сервер в потоке
+    # Запускаем сервер
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
-    
     time.sleep(2)
     
-    # Запускаем стриминг в потоке
+    # Запускаем стриминг
     stream_thread = threading.Thread(target=background_stream, daemon=True)
     stream_thread.start()
     
-    # Запускаем туннель в потоке
+    # Запускаем туннель
+    print("\n🔄 Запуск туннеля...")
     tunnel_thread = threading.Thread(target=start_tunnel, daemon=True)
     tunnel_thread.start()
     
-    # Ждём туннель (максимум 60 секунд)
-    print("\n🔄 Ожидание создания туннеля...")
-    for i in range(60):
+    # Ждём туннель
+    for i in range(45):
         if tunnel_ready:
             break
         time.sleep(1)
@@ -366,12 +497,13 @@ def main():
     if tunnel_ready and public_url:
         print(f"\n✅ ТУННЕЛЬ ГОТОВ: {public_url}")
     else:
-        print("\n⚠️ Туннель не создан, бот будет работать локально")
+        print("\n⚠️ Туннель не создан")
+        print("💡 Альтернатива: запустите вручную в другом терминале:")
+        print("   npx localtunnel --port 8080")
     
-    # Запускаем бота (синхронно)
+    # Запускаем бота
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     
