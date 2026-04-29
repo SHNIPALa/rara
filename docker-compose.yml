@@ -1,32 +1,17 @@
 version: '3.8'
 
 services:
-  icecast:
-    image: moul/icecast:latest
-    container_name: icecast
-    restart: unless-stopped
-    ports:
-      - "8000:8000"  # Поток для слушателей
-    environment:
-      - ICECAST_SOURCE_PASSWORD=hackme
-      - ICECAST_ADMIN_PASSWORD=hackme
-      - ICECAST_HOSTNAME=193.233.114.7
-    volumes:
-      - ./icecast.xml:/etc/icecast.xml
-    network_mode: host
-
   radio-bot:
     build: .
-    container_name: radio-bot
+    container_name: super-radio
     restart: unless-stopped
-    depends_on:
-      - icecast
+    ports:
+      - "8080:8080"   # Поток
+      - "4040:4040"   # Ngrok статус
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ADMIN_IDS=${ADMIN_IDS}
-      - STREAM_URL=http://193.233.114.7:8000/stream
     volumes:
       - ./music:/app/music
-      - ./pending:/app/pending
-      - ./data:/app/data
-    network_mode: host
+    stdin_open: true
+    tty: true
