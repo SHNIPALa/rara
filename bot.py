@@ -1,48 +1,70 @@
+#!/usr/bin/env python3
+"""
+SUPER RADIO BOT
+Мощный Telegram бот для интернет-радио с авто-туннелем
+"""
+
 import os
 import time
 import threading
 import sqlite3
 import random
-import subprocess
+import asyncio
+import json
 from pathlib import Path
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Dict, List, Optional
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from mutagen.mp3 import MP3
+from dotenv import load_dotenv
 
-# ===== КОНФИГУРАЦИЯ =====
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q")
-ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
-STREAM_URL = os.getenv('STREAM_URL', 'http://193.233.114.7:8000/stream')
+load_dotenv()
+
+# ==================== КОНФИГУРАЦИЯ ====================
+PORT = 8080
 MUSIC_FOLDER = "music"
-PENDING_FOLDER = "pending"
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 
 # Создаем папки
-os.makedirs(MUSIC_FOLDER, exist_ok=True)
-os.makedirs(PENDING_FOLDER, exist_ok=True)
-os.makedirs("data", exist_ok=True)
+Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
 # Глобальные переменные
-playlist = []
-current_song = None
+playlist: List[Path] = []
+current_song: Optional[Path] = None
+current_file = None
+current_position = 0
+listeners = 0
+current_status = "⏸️ Остановлено"
 
-
-# ===== БАЗА ДАННЫХ =====
+# ==================== БАЗА ДАННЫХ ====================
 def init_db():
-    conn = sqlite3.connect('data/radio.db')
+    conn = sqlite3.connect('radio.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, username TEXT, approved INTEGER DEFAULT 1)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS pending_songs
-                 (id INTEGER PRIMARY KEY, filename TEXT, user_id INTEGER, user_name TEXT, date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS stats
+                 (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  song_name TEXT, listeners INT, date TEXT)''')
     conn.commit()
     conn.close()
 
-
 init_db()
 
+def save_stats():
+    conn = sqlite3.connect('radio.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO stats (key, value) VALUES (?, ?)",
+              ('total_listeners', str(listeners)))
+    c.execute("INSERT INTO history (song_name, listeners, date) VALUES (?, ?, ?)",
+              (current_song.name if current_song else 'None', listeners, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
 
-# ===== РАДИО ПЛЕЙЛИСТ =====
+# ==================== РАДИО ПЛЕЙЛИСТ ====================
 def load_playlist():
     global playlist, current_song
     playlist = []
@@ -52,9 +74,26 @@ def load_playlist():
         random.shuffle(playlist)
         current_song = playlist[0]
         print(f"📀 Загружено {len(playlist)} песен")
+        print(f"🎵 Первая песня: {current_song.name}")
     else:
-        print(f"⚠️ Нет MP3 в папке '{MUSIC_FOLDER}'")
+        print(f"⚠️ Нет MP3! Положите файлы в папку 'music'")
 
+def next_song():
+    global current_song, current_file, current_position, current_status
+    if not playlist:
+        return
+    if current_file:
+        current_file.close()
+        current_file = None
+    if current_song in playlist:
+        idx = playlist.index(current_song)
+        current_song = playlist[(idx + 1) % len(playlist)]
+    else:
+        current_song = playlist[0]
+    current_position = 0
+    current_status = f"🎵 {current_song.stem}"
+    print(f"🎵 Сейчас: {current_song.name}")
+    save_stats()
 
 def get_song_info():
     if current_song and current_song.exists():
@@ -62,237 +101,359 @@ def get_song_info():
             audio = MP3(current_song)
             return {
                 'title': current_song.stem,
-                'duration_str': f"{int(audio.info.length) // 60}:{int(audio.info.length) % 60:02d}"
+                'duration': int(audio.info.length),
+                'duration_str': f"{int(audio.info.length)//60}:{int(audio.info.length)%60:02d}",
+                'size_mb': round(current_song.stat().st_size / 1024 / 1024, 2)
             }
         except:
             pass
-    return {'title': 'Нет песен', 'duration_str': '0:00'}
+    return {'title': 'Нет песен', 'duration': 0, 'duration_str': '0:00', 'size_mb': 0}
 
+# ==================== HTTP РАДИО СЕРВЕР ====================
+class RadioHandler(BaseHTTPRequestHandler):
+    
+    def log_message(self, format, *args):
+        pass
+    
+    def do_GET(self):
+        global listeners, current_file, current_position, current_song, playlist
+        
+        # АУДИО ПОТОК
+        if self.path in ['/stream.mp3', '/stream']:
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Content-Disposition', 'attachment; filename="radio.mp3"')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            listeners += 1
+            print(f"🔊 Слушатель #{listeners}: {self.client_address[0]}")
+            
+            try:
+                while True:
+                    if not playlist:
+                        time.sleep(1)
+                        continue
+                    
+                    if not current_song and playlist:
+                        current_song = playlist[0]
+                    
+                    if not current_file and current_song:
+                        current_file = open(current_song, 'rb')
+                        current_position = 0
+                        print(f"▶️ {current_song.name}")
+                    
+                    if current_file:
+                        current_file.seek(current_position)
+                        data = current_file.read(8192)
+                        
+                        if data:
+                            current_position += len(data)
+                            self.wfile.write(data)
+                            self.wfile.flush()
+                        else:
+                            current_file.close()
+                            current_file = None
+                            next_song()
+                    
+                    await_asyncio(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                listeners -= 1
+                print(f"🔇 Слушатель ушел (осталось: {listeners})")
+        
+        # КРАСИВЫЙ ВЕБ-ПЛЕЕР
+        elif self.path == '/':
+            info = get_song_info()
+            stream_url = f"{os.getenv('STREAM_URL', 'http://localhost:8080')}/stream.mp3"
+            
+            html = f'''<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>🎵 SUPER RADIO | Интернет-радио</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }}
+        .player {{
+            background: rgba(255,255,255,0.95);
+            border-radius: 30px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s;
+        }}
+        .player:hover {{ transform: scale(1.02); }}
+        h1 {{
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }}
+        .subtitle {{
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 0.9em;
+        }}
+        audio {{
+            width: 100%;
+            margin: 20px 0;
+            border-radius: 30px;
+        }}
+        .info {{
+            background: linear-gradient(135deg, #667eea15, #764ba215);
+            padding: 20px;
+            border-radius: 20px;
+            margin: 20px 0;
+            text-align: center;
+        }}
+        .song-title {{
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #764ba2;
+            margin-bottom: 5px;
+        }}
+        .stats {{
+            display: flex;
+            justify-content: space-around;
+            margin-top: 10px;
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .url {{
+            background: #f0f0f0;
+            padding: 12px;
+            border-radius: 15px;
+            font-size: 12px;
+            word-break: break-all;
+            text-align: center;
+            margin-top: 15px;
+        }}
+        .url a {{ color: #764ba2; text-decoration: none; }}
+        button {{
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 30px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            margin-top: 15px;
+            transition: opacity 0.3s;
+        }}
+        button:hover {{ opacity: 0.9; }}
+        .online {{ color: #4caf50; font-weight: bold; }}
+        @keyframes pulse {{
+            0% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+            100% {{ opacity: 1; }}
+        }}
+        .live {{ animation: pulse 2s infinite; color: #f44336; }}
+    </style>
+</head>
+<body>
+    <div class="player">
+        <h1>🎵 SUPER RADIO</h1>
+        <div class="subtitle">24/7 Интернет-радио</div>
+        
+        <audio controls autoplay>
+            <source src="/stream.mp3" type="audio/mpeg">
+        </audio>
+        
+        <div class="info">
+            <div class="song-title">🎤 {info['title']}</div>
+            <div class="stats">
+                <span>⏱️ {info['duration_str']}</span>
+                <span>💾 {info['size_mb']} MB</span>
+                <span>👥 {listeners} слушателей</span>
+            </div>
+        </div>
+        
+        <div class="url">
+            🔗 Прямая ссылка:<br>
+            <a href="{stream_url}">{stream_url}</a>
+        </div>
+        
+        <button onclick="window.location.href='{stream_url}'">
+            📥 Скачать поток
+        </button>
+    </div>
+</body>
+</html>'''
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(html.encode())
+        
+        # API СТАТУСА
+        elif self.path == '/api/status':
+            info = get_song_info()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'status': 'online',
+                'current_song': info['title'],
+                'listeners': listeners,
+                'playlist_size': len(playlist),
+                'uptime': current_status
+            }).encode())
+        
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-# ===== TELEGRAM БОТ =====
+def await_asyncio(seconds):
+    """Хак для ожидания в синхронном коде"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(asyncio.sleep(seconds))
+    loop.close()
+
+def run_radio_server():
+    server = HTTPServer(('0.0.0.0', PORT), RadioHandler)
+    print(f"✅ Радио сервер: http://localhost:{PORT}")
+    server.serve_forever()
+
+# ==================== TELEGRAM БОТ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "No username"
-
-    conn = sqlite3.connect('data/radio.db')
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-    conn.commit()
-    conn.close()
-
     info = get_song_info()
-
+    stream_url = os.getenv('STREAM_URL', f'http://localhost:{PORT}/stream.mp3')
+    
     keyboard = [
-        [InlineKeyboardButton("🎵 Слушать радио", url=STREAM_URL)],
-        [InlineKeyboardButton("🎧 Веб-плеер", url=STREAM_URL.replace('/stream', ''))],
-        [InlineKeyboardButton("📤 Отправить трек", callback_data="upload")],
-        [InlineKeyboardButton("📊 Статус", callback_data="status")]
+        [InlineKeyboardButton("🎵 СЛУШАТЬ РАДИО", url=stream_url)],
+        [InlineKeyboardButton("🌐 ОТКРЫТЬ ВЕБ-ПЛЕЕР", url=stream_url.replace('/stream.mp3', ''))],
+        [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=stream_url)],
+        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
+        [InlineKeyboardButton("ℹ️ ПОМОЩЬ", callback_data="help")]
     ]
-
-    if user_id in ADMIN_IDS:
-        keyboard.append([InlineKeyboardButton("🔧 Админ панель", callback_data="admin")])
-
+    
     await update.message.reply_text(
-        f"🎵 *РАДИО БОТ*\n\n"
-        f"🔗 *Ссылка для друзей:*\n"
-        f"`{STREAM_URL}`\n\n"
-        f"📊 *Сейчас в эфире:*\n"
-        f"🎵 {info['title']}\n"
-        f"📀 {len(playlist)} песен в ротации\n\n"
-        f"💡 *Как слушать:*\n"
-        f"• Открыть ссылку в браузере\n"
-        f"• Или вставить в VLC: Media → Open Network Stream\n\n"
-        f"💡 *Как добавить трек:*\n"
-        f"Нажмите 'Отправить трек' и загрузите MP3",
+        f"🎵 *SUPER RADIO BOT*\n\n"
+        f"┌─ 🎤 Сейчас: `{info['title']}`\n"
+        f"├─ ⏱️ Длительность: {info['duration_str']}\n"
+        f"├─ 👥 Слушателей: {listeners}\n"
+        f"└─ 📀 Песен: {len(playlist)}\n\n"
+        f"🔗 *Ссылка для друзей:*\n`{stream_url}`\n\n"
+        f"💡 Просто отправьте эту ссылку друзьям —\n"
+        f"   она откроется в любом браузере!",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
-
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-
-    if query.data == "get_link":
-        await query.edit_message_text(
-            f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
-            f"📥 *Прямая ссылка:*\n"
-            f"`{STREAM_URL}`\n\n"
-            f"📱 Отправьте эту ссылку друзьям - они смогут слушать в браузере!",
-            parse_mode='Markdown'
-        )
-
-    elif query.data == "upload":
-        await query.edit_message_text(
-            "📤 *Отправьте MP3 файл*\n\n"
-            "Просто отправьте MP3 файл, он уйдет на модерацию.\n"
-            "После одобрения появится в эфире!\n\n"
-            "✅ Максимальный размер: 50MB",
-            parse_mode='Markdown'
-        )
-
-    elif query.data == "status":
+    
+    if query.data == "status":
         info = get_song_info()
         await query.edit_message_text(
             f"📊 *СТАТУС РАДИО*\n\n"
-            f"🎵 Сейчас: *{info['title']}*\n"
-            f"⏱️ {info['duration_str']}\n"
-            f"📀 Песен в плейлисте: *{len(playlist)}*\n"
-            f"🔗 Ссылка: `{STREAM_URL}`\n\n"
-            f"🎚️ Сервер: ✅ Активен",
+            f"┌─ 🎵 Сейчас: `{info['title']}`\n"
+            f"├─ ⏱️ Длительность: {info['duration_str']}\n"
+            f"├─ 👥 Слушателей: {listeners}\n"
+            f"├─ 📀 Песен: {len(playlist)}\n"
+            f"└─ 🎚️ Сервер: ✅ Активен\n\n"
+            f"🔗 Ссылка: `{os.getenv('STREAM_URL')}`",
+            parse_mode='Markdown'
+        )
+    elif query.data == "help":
+        await query.edit_message_text(
+            f"ℹ️ *ПОМОЩЬ*\n\n"
+            f"🎵 *Как слушать:*\n"
+            f"1. Нажмите «Слушать радио»\n"
+            f"2. Или откройте ссылку в браузере\n"
+            f"3. Или вставьте в VLC (Media → Open Network Stream)\n\n"
+            f"📤 *Как добавить музыку:*\n"
+            f"• Положите MP3 в папку `music`\n"
+            f"• Или отправьте боту через /upload\n\n"
+            f"🔄 *Плейлист обновляется автоматически*",
             parse_mode='Markdown'
         )
 
-    elif query.data == "admin" and user_id in ADMIN_IDS:
-        await show_admin_panel(update, context)
-
-    elif query.data.startswith("approve_"):
-        song_id = int(query.data.split("_")[1])
-        conn = sqlite3.connect('data/radio.db')
-        c = conn.cursor()
-        c.execute("SELECT filename FROM pending_songs WHERE id = ?", (song_id,))
-        song = c.fetchone()
-        if song:
-            # Перемещаем из pending в music
-            src = Path(PENDING_FOLDER) / song[0]
-            dst = Path(MUSIC_FOLDER) / song[0]
-            if src.exists():
-                src.rename(dst)
-                load_playlist()
-                # Перезапускаем FFmpeg
-                os.system("pkill ffmpeg")
-            c.execute("DELETE FROM pending_songs WHERE id = ?", (song_id,))
-            await query.edit_message_text(f"✅ Трек одобрен! Он уже в эфире")
-        else:
-            await query.edit_message_text(f"❌ Трек не найден")
-        conn.commit()
-        conn.close()
-        await show_admin_panel(update, context)
-
-    elif query.data.startswith("reject_"):
-        song_id = int(query.data.split("_")[1])
-        conn = sqlite3.connect('data/radio.db')
-        c = conn.cursor()
-        c.execute("SELECT filename FROM pending_songs WHERE id = ?", (song_id,))
-        song = c.fetchone()
-        if song:
-            src = Path(PENDING_FOLDER) / song[0]
-            if src.exists():
-                src.unlink()
-            c.execute("DELETE FROM pending_songs WHERE id = ?", (song_id,))
-            await query.edit_message_text(f"❌ Трек отклонен")
-        else:
-            await query.edit_message_text(f"❌ Трек не найден")
-        conn.commit()
-        conn.close()
-        await show_admin_panel(update, context)
-
-    elif query.data == "back":
-        await start(update, context)
-
-
-async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-
-    conn = sqlite3.connect('data/radio.db')
-    c = conn.cursor()
-    c.execute("SELECT id, filename, user_name, date FROM pending_songs ORDER BY date DESC")
-    pending = c.fetchall()
-    conn.close()
-
-    keyboard = []
-
-    if pending:
-        keyboard.append([InlineKeyboardButton("📀 ТРЕКИ НА МОДЕРАЦИИ:", callback_data="none")])
-        for song_id, filename, user_name, date in pending:
-            keyboard.append([
-                InlineKeyboardButton(f"✅ {filename[:25]}", callback_data=f"approve_{song_id}"),
-                InlineKeyboardButton(f"❌", callback_data=f"reject_{song_id}")
-            ])
-    else:
-        keyboard.append([InlineKeyboardButton("✅ Нет треков на модерации", callback_data="none")])
-
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back")])
-
-    await query.edit_message_text(
-        "🔧 *АДМИН ПАНЕЛЬ*\n\n"
-        f"📀 Треков ожидают: {len(pending)}\n\n"
-        "Управление треками:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "No username"
-
     if update.message.audio:
         file = update.message.audio
-        file_name = file.file_name
-
-        if file.file_size > 50 * 1024 * 1024:
-            await update.message.reply_text("❌ Файл слишком большой! Максимум 50MB")
-            return
-
-        status_msg = await update.message.reply_text(f"📥 Загружаю {file_name}...")
-
+        msg = await update.message.reply_text(f"📥 Загружаю {file.file_name}...")
+        
         try:
             new_file = await context.bot.get_file(file.file_id)
-            file_path = Path(PENDING_FOLDER) / file_name
+            file_path = Path(MUSIC_FOLDER) / file.file_name
             await new_file.download_to_drive(file_path)
-
-            conn = sqlite3.connect('data/radio.db')
-            c = conn.cursor()
-            c.execute("INSERT INTO pending_songs (filename, user_id, user_name, date) VALUES (?, ?, ?, ?)",
-                      (file_name, user_id, username, datetime.now().isoformat()))
-            conn.commit()
-            conn.close()
-
-            for admin_id in ADMIN_IDS:
-                try:
-                    await context.bot.send_message(
-                        admin_id,
-                        f"📀 *НОВЫЙ ТРЕК!*\n\n"
-                        f"От: {username}\n"
-                        f"Файл: {file_name}",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass
-
-            await status_msg.edit_text(
-                f"✅ *Трек отправлен на модерацию!*\n\n"
-                f"📀 {file_name}\n"
-                f"После одобрения трек появится в эфире",
+            
+            # Добавляем в плейлист
+            playlist.append(file_path)
+            if not current_song:
+                load_playlist()
+            
+            await msg.edit_text(
+                f"✅ *Добавлено в плейлист!*\n\n"
+                f"📀 {file.file_name}\n"
+                f"📊 Всего песен: {len(playlist)}",
                 parse_mode='Markdown'
             )
         except Exception as e:
-            await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
+            await msg.edit_text(f"❌ Ошибка: {str(e)}")
 
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🤖 *SUPER RADIO BOT v2.0*\n\n"
+        f"⚡ Поддерживает до 100 слушателей\n"
+        f"🎵 Автоматическое переключение песен\n"
+        f"📡 HTTP/HTTPS поток\n"
+        f"🎧 Работает в любом плеере\n\n"
+        f"📱 *Разработка:* @super_radio",
+        parse_mode='Markdown'
+    )
 
 def main():
+    # Загружаем плейлист
     load_playlist()
-
+    
+    # Запускаем радио сервер в отдельном потоке
+    radio_thread = threading.Thread(target=run_radio_server, daemon=True)
+    radio_thread.start()
+    
+    time.sleep(2)
+    
+    # Запускаем бота
     application = Application.builder().token(TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
-
+    
+    stream_url = os.getenv('STREAM_URL', f'http://localhost:{PORT}/stream.mp3')
+    
     print("\n" + "=" * 50)
-    print("✅ БОТ ЗАПУЩЕН!")
+    print("🤖 SUPER RADIO BOT v2.0")
     print("=" * 50)
     print(f"\n🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ:")
-    print(f"   {STREAM_URL}")
+    print(f"   {stream_url}")
     print(f"\n🌐 ВЕБ-ПЛЕЕР:")
-    print(f"   {STREAM_URL.replace('/stream', '')}")
-    print("\n🤖 Бот готов к работе в Telegram")
+    print(f"   {stream_url.replace('/stream.mp3', '')}")
+    print(f"\n📊 API СТАТУСА:")
+    print(f"   {stream_url.replace('/stream.mp3', '/api/status')}")
+    print("\n🤖 Telegram бот активен")
     print("=" * 50 + "\n")
-
+    
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()
