@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - с bore.pub туннелем
+SUPER RADIO - Автономная версия с bore туннелем
 """
 
 import os
 import time
 import threading
+import subprocess
 import random
 import json
 import requests
-import subprocess
-import re
+import signal
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,26 +34,41 @@ public_url = None
 bore_process = None
 
 # ==================== BORE ТУННЕЛЬ ====================
-def get_bore_url():
-    """Получение URL от bore"""
+def start_bore_tunnel():
+    """Запуск bore туннеля и получение URL"""
+    global bore_process, public_url
+    
     try:
-        # Ждём появления URL в логах
+        # Запускаем bore в фоне
+        bore_process = subprocess.Popen(
+            ['bore', 'local', str(PORT), '--to', 'bore.pub'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        
+        # Ждём и читаем вывод для получения порта
         for i in range(30):
-            result = subprocess.run(['pgrep', '-a', 'bore'], capture_output=True, text=True)
-            if result.stdout:
-                # Пытаемся получить URL через API bore (если есть)
-                try:
-                    resp = requests.get('http://localhost:4040/api/tunnels', timeout=2)
-                    tunnels = resp.json().get('tunnels', [])
-                    for tunnel in tunnels:
-                        if tunnel.get('proto') == 'https':
-                            return tunnel.get('public_url')
-                except:
-                    pass
+            if bore_process.stdout:
+                line = bore_process.stdout.readline()
+                print(f"Bore: {line.strip()}")
+                # Ищем listening at bore.pub:xxxxx
+                import re
+                match = re.search(r'bore\.pub:(\d+)', line)
+                if match:
+                    port = match.group(1)
+                    public_url = f"https://bore.pub:{port}"
+                    print(f"\n✅ ТУННЕЛЬ СОЗДАН!")
+                    print(f"🔗 ПУБЛИЧНАЯ ССЫЛКА: {public_url}")
+                    return True
             time.sleep(1)
-        return None
-    except:
-        return None
+        
+        print("⚠️ Не удалось получить URL от bore")
+        return False
+        
+    except Exception as e:
+        print(f"❌ Ошибка bore: {e}")
+        return False
 
 # ==================== ЗАГРУЗКА ПЛЕЙЛИСТА ====================
 def load_playlist():
@@ -62,6 +77,8 @@ def load_playlist():
     if playlist:
         random.shuffle(playlist)
         print(f"📀 Загружено {len(playlist)} песен")
+        for i, song in enumerate(playlist[:5]):
+            print(f"   {i+1}. {song.name}")
     else:
         print(f"⚠️ НЕТ MP3! Положите файлы в папку 'music'")
     return len(playlist)
@@ -124,6 +141,7 @@ class RadioHandler(BaseHTTPRequestHandler):
         elif self.path == '/':
             info = get_song_info()
             stream_url = f"{public_url}/radio.mp3" if public_url else f"http://localhost:{PORT}/radio.mp3"
+            web_url = public_url if public_url else f"http://localhost:{PORT}"
             
             html = f'''<!DOCTYPE html>
 <html lang="ru">
@@ -207,6 +225,8 @@ class RadioHandler(BaseHTTPRequestHandler):
                 const res = await fetch('/status');
                 const data = await res.json();
                 document.querySelector('.song-title').innerHTML = `🎤 ${{data.current_song}}`;
+                const stats = document.querySelector('.stats');
+                if (stats) stats.innerHTML = `<span>👥 ${{data.listeners}} слушателей</span><span>📀 ${{data.playlist_size}} песен</span>`;
             }} catch(e) {{}}
         }}, 5000);
     </script>
@@ -222,6 +242,7 @@ class RadioHandler(BaseHTTPRequestHandler):
             info = get_song_info()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'current_song': info['title'],
@@ -271,16 +292,12 @@ def background_stream():
 
 # ==================== TELEGRAM БОТ ====================
 async def start(update, context):
-    global public_url
-    
-    if not public_url:
-        public_url = "http://localhost:8080"
-    
-    stream_url = f"{public_url}/radio.mp3"
     info = get_song_info()
+    web_url = public_url if public_url else f"http://localhost:{PORT}"
+    stream_url = f"{web_url}/radio.mp3"
     
     keyboard = [
-        [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=public_url)],
+        [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
         [InlineKeyboardButton("📥 СКАЧАТЬ ПОТОК", url=stream_url)],
         [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
         [InlineKeyboardButton("📤 ДОБАВИТЬ ТРЕК", callback_data="upload")]
@@ -291,9 +308,9 @@ async def start(update, context):
         f"┌─ 🎤 `{info['title']}`\n"
         f"├─ 👥 {len(clients)} слушателей\n"
         f"├─ 📀 {len(playlist)} песен\n"
-        f"└─ 🌍 {public_url}\n\n"
-        f"🔗 *Ссылка:*\n`{public_url}`\n\n"
-        f"💡 Отправьте ссылку друзьям!",
+        f"└─ 🌍 {web_url}\n\n"
+        f"🔗 *Ссылка для друзей:*\n`{web_url}`\n\n"
+        f"💡 Отправьте ссылку друзьям - откроется плеер!",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -304,18 +321,24 @@ async def callback_handler(update, context):
     
     if query.data == "status":
         info = get_song_info()
+        web_url = public_url if public_url else f"http://localhost:{PORT}"
         await query.edit_message_text(
-            f"📊 *СТАТУС*\n\n"
-            f"🎵 {info['title']}\n"
-            f"👥 {len(clients)} слушателей\n"
-            f"📀 {len(playlist)} песен\n"
-            f"🔗 {public_url}",
+            f"📊 *СТАТУС РАДИО*\n\n"
+            f"🎵 Сейчас: `{info['title']}`\n"
+            f"⏱️ Длительность: {info['duration']}\n"
+            f"👥 Слушателей: {len(clients)}\n"
+            f"📀 Песен: {len(playlist)}\n"
+            f"🔗 Ссылка: `{web_url}`\n"
+            f"🎚️ Сервер: ✅ Активен",
             parse_mode='Markdown'
         )
     elif query.data == "upload":
         await query.edit_message_text(
-            "📤 Отправьте MP3 файл!\n\n"
-            "Поддерживаются MP3 до 50MB",
+            "📤 *ЗАГРУЗКА МУЗЫКИ*\n\n"
+            "1. Положите MP3 в папку `music`\n"
+            "2. Или отправьте MP3 файл прямо сейчас\n\n"
+            "✅ Поддерживаются MP3 до 50MB\n"
+            "🎵 После загрузки трек появится в плейлисте",
             parse_mode='Markdown'
         )
 
@@ -333,6 +356,16 @@ async def handle_audio(update, context):
         except Exception as e:
             await msg.edit_text(f"❌ Ошибка: {str(e)}")
 
+async def link_command(update, context):
+    web_url = public_url if public_url else f"http://localhost:{PORT}"
+    await update.message.reply_text(
+        f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
+        f"`{web_url}`\n\n"
+        f"📱 Отправьте эту ссылку друзьям,\n"
+        f"   чтобы они могли слушать радио!",
+        parse_mode='Markdown'
+    )
+
 # ==================== ЗАПУСК ====================
 def main():
     global public_url
@@ -344,7 +377,7 @@ def main():
     # Загружаем плейлист
     load_playlist()
     
-    # Запускаем сервер
+    # Запускаем радио сервер
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
@@ -354,21 +387,26 @@ def main():
     stream_thread = threading.Thread(target=background_stream, daemon=True)
     stream_thread.start()
     
-    print("\n✅ Радио работает локально: http://localhost:8080")
-    print("\n🔗 ДЛЯ ПУБЛИЧНОГО ДОСТУПА:")
-    print("   Запустите в ДРУГОМ терминале:")
-    print("   bore local 8080 --to bore.pub")
-    print("\n   После запуска появится ссылка вида:")
-    print("   https://bore.pub:12345")
-    print("\n   Это и есть ваша ссылка для друзей!")
+    # Запускаем bore туннель
+    print("\n🔄 Запуск bore туннеля...")
+    start_bore_tunnel()
     
     # Запускаем бота
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     
     print("\n✅ Бот запущен!")
+    print("=" * 50)
+    print("\n🔗 ДЛЯ ДРУЗЕЙ:")
+    if public_url:
+        print(f"   {public_url}")
+    else:
+        print("   Ссылка появится через несколько секунд...")
+    print("\n" + "=" * 50 + "\n")
+    
     app.run_polling()
 
 if __name__ == '__main__':
