@@ -17,4 +17,4 @@ RUN chmod +x start.sh
 
 RUN mkdir -p music
 
-CMD ["./start.sh"]
+CMD ["python bot.py"]
