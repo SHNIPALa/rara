@@ -1,17 +1,46 @@
 version: '3.8'
 
 services:
-  radio-bot:
-    build: .
-    container_name: super-radio
+  # Icecast сервер для раздачи аудио
+  icecast:
+    image: moul/icecast:latest
+    container_name: super-icecast
     restart: unless-stopped
     ports:
-      - "8080:8080"   # Поток
-      - "4040:4040"   # Ngrok статус
+      - "8000:8000"  # Поток для слушателей
+    environment:
+      - ICECAST_SOURCE_PASSWORD=superpass
+      - ICECAST_ADMIN_PASSWORD=adminpass
+      - ICECAST_RELAY_PASSWORD=relaypass
+      - ICECAST_HOSTNAME=0.0.0.0
+    volumes:
+      - ./icecast.xml:/etc/icecast/icecast.xml
+    network_mode: bridge
+
+  # Нгрок туннель (на случай если порт закрыт)
+  ngrok:
+    image: wernight/ngrok
+    container_name: super-ngrok
+    restart: unless-stopped
+    ports:
+      - "4040:4040"
+    environment:
+      - NGROK_PORT=icecast:8000
+    depends_on:
+      - icecast
+    network_mode: bridge
+
+  # Telegram бот + стример
+  radio-bot:
+    build: .
+    container_name: super-bot
+    restart: unless-stopped
+    depends_on:
+      - icecast
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ADMIN_IDS=${ADMIN_IDS}
+      - ICECAST_URL=http://icecast:8000/stream
     volumes:
       - ./music:/app/music
-    stdin_open: true
-    tty: true
+    network_mode: bridge
