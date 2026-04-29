@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Установка bore-cli
+# Установка ffmpeg и bore
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
@@ -14,9 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
-COPY start.sh .
-RUN chmod +x start.sh
 
 RUN mkdir -p music
 
-CMD ["./start.sh"]
+CMD ["python", "bot.py"]
