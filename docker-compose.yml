@@ -6,8 +6,5 @@ services:
     container_name: super-radio
     restart: unless-stopped
     network_mode: host
-    environment:
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - ADMIN_IDS=${ADMIN_IDS}
     volumes:
       - ./music:/app/music
