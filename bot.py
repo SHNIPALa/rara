@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Telegram-бот для MPD-радио.
-Загружает файлы, управляет воспроизведением, даёт ссылку на поток.
+Telegram-бот для MPD + Icecast радио.
 """
-
-import os
-import logging
-import sys
+import os, logging, sys, asyncio
 from pathlib import Path
-import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from mpd import MPDClient, ConnectionError
+from mpd import MPDClient
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
-PUBLIC_URL = os.getenv("PUBLIC_URL", "")          # внешний URL потока
+PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8000/radio.mp3")
 MPD_HOST = os.getenv("MPD_HOST", "mpd")
 MPD_PORT = int(os.getenv("MPD_PORT", "6600"))
 MUSIC_DIR = os.getenv("MUSIC_DIR", "/music")
@@ -29,16 +24,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def mpd_client():
-    """Создаёт подключение к MPD."""
-    client = MPDClient()
-    client.timeout = 5
-    client.connect(MPD_HOST, MPD_PORT)
-    return client
+    c = MPDClient()
+    c.timeout = 5
+    c.connect(MPD_HOST, MPD_PORT)
+    return c
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     buttons = [
-        [InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=PUBLIC_URL if PUBLIC_URL else "about:blank")],
+        [InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=PUBLIC_URL)],
         [InlineKeyboardButton(text="📤 ЗАГРУЗИТЬ", callback_data="upload")],
         [InlineKeyboardButton(text="📊 СТАТУС", callback_data="status")]
     ]
@@ -50,8 +44,8 @@ async def start_cmd(message: types.Message):
         ])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
-        "🎵 *Super MPD Radio*\n"
-        "Ссылка на поток: `" + (PUBLIC_URL or "не задана") + "`",
+        "🎵 *MPD + Icecast Radio*\n"
+        f"Слушать: `{PUBLIC_URL}`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb
     )
@@ -65,19 +59,16 @@ async def callback_handler(callback: types.CallbackQuery):
                 status = c.status()
                 song = c.currentsong()
                 title = song.get("title", "нет трека")
-                listeners = status.get("num_httpd_clients", "0")
-                state = status.get("state", "stop")
-            text = f"🎤 {title}\n👥 {listeners} слушателей\n🔊 {state}"
+            text = f"🎤 {title}\n🔊 {status['state']}"
         except Exception as e:
             text = f"Ошибка MPD: {e}"
-        await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        await callback.message.edit_text(text)
     elif data == "upload":
         await callback.message.edit_text("📤 Отправь мне MP3/FLAC/OGG файл.")
     elif data == "toggle" and callback.from_user.id in ADMIN_IDS:
         try:
             with mpd_client() as c:
-                status = c.status()
-                if status["state"] == "play":
+                if c.status()["state"] == "play":
                     c.pause(1)
                     await callback.answer("⏸ Пауза")
                 else:
@@ -108,7 +99,6 @@ async def handle_file(message: types.Message):
     file = message.audio or message.document
     if not file:
         return
-    # Проверяем расширение
     allowed = (".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav")
     fname = file.file_name or "track.mp3"
     if not fname.lower().endswith(allowed):
@@ -122,7 +112,6 @@ async def handle_file(message: types.Message):
         file_info = await bot.get_file(file.file_id)
         dest = Path(MUSIC_DIR) / fname
         await bot.download_file(file_info.file_path, destination=str(dest))
-        # Обновляем базу MPD
         with mpd_client() as c:
             c.update()
         await msg.edit_text("✅ Загружено, база обновлена.")
@@ -130,7 +119,7 @@ async def handle_file(message: types.Message):
         await msg.edit_text(f"❌ Ошибка: {e}")
 
 async def main():
-    logger.info("Бот запущен")
+    logger.info("Бот стартовал")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
