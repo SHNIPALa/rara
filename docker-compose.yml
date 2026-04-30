@@ -43,12 +43,13 @@ services:
       - MUSIC_DIR=/music
     depends_on:
       - mpd
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: radio-cf
+cloudpub:
+    image: ermakdev/cloudpub-client:latest
+    container_name: radio-cloudpub
     restart: unless-stopped
-    command: tunnel --no-autoupdate run --url http://icecast:8000
+    environment:
+      - CLOUDPUB_TOKEN=${CLOUDPUB_TOKEN}   # берём токен из .env
+    command: http icecast:8000
     depends_on:
       - icecast
 
