@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-МИНИ-РАДИО + авто-обнаружение URL от CloudPub
-- Стримит mp3 на порту 8080
-- Читает публичный URL из /shared/cloudpub_url.txt
-- Выводит его в собственный лог
-- Позволяет установить URL вручную через /seturl (админ)
+СУПЕР-РАДИО НА АВТОМАТЕ
+- Встроенный HTTP-плеер на порту 8080
+- Стриминг mp3-потока /radio.mp3
+- Сам запускает временный Cloudflare-туннель, получает HTTPS-адрес
+- Адрес сразу выводится в логи, бот показывает рабочую кнопку
+- Загрузка треков через Telegram
 """
 
-import os, time, threading, random, logging, asyncio, re
+import os
+import time
+import threading
+import random
+import logging
+import asyncio
+import subprocess
+import re
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 
-# ---------- НАСТРОЙКИ ----------
+# ---------- КОНФИГ ----------
 PORT = int(os.getenv("PORT", "8080"))
 MUSIC_FOLDER = os.getenv("MUSIC_FOLDER", "music")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -28,13 +37,8 @@ def parse_admin_ids():
 
 ADMIN_IDS = parse_admin_ids()
 
-SHARED_DIR = os.getenv("SHARED_DIR", "/shared")
-URL_FILE = Path(SHARED_DIR) / "cloudpub_url.txt"
-
-# Глобальный URL – пытаемся загрузить из файла
+# Публичный URL, который нам даст туннель
 PUBLIC_URL = ""
-if URL_FILE.exists():
-    PUBLIC_URL = URL_FILE.read_text().strip()
 
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
@@ -167,24 +171,37 @@ def playlist_monitor():
         load_playlist()
         time.sleep(30)
 
-# ---------- ОБНАРУЖЕНИЕ URL ----------
-def watch_for_url():
-    """Фоновый поток: читает файл, вытаскивает URL и печатает в лог."""
+# ---------- ЗАПУСК ТУННЕЛЯ ----------
+def start_cloudflare_tunnel():
+    """Запускает временный Cloudflare-туннель и возвращает публичный URL."""
     global PUBLIC_URL
-    pattern = re.compile(r'(https://[a-zA-Z0-9\-]+\.cloudpub\.ru)')
-    while True:
-        try:
-            if URL_FILE.exists():
-                text = URL_FILE.read_text()
-                match = pattern.search(text)
-                if match:
-                    url = match.group(1)
-                    if url != PUBLIC_URL:
-                        PUBLIC_URL = url
-                        logging.info(f"✅ Публичный URL радио: {PUBLIC_URL}")
-        except Exception as e:
-            logging.error(f"Ошибка чтения файла URL: {e}")
-        time.sleep(5)
+    logging.info("Запуск временного Cloudflare-туннеля...")
+    try:
+        proc = subprocess.Popen(
+            ['cloudflared', 'tunnel', '--no-autoupdate', '--url', f'http://localhost:{PORT}'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
+        # Читаем вывод, пока не найдём URL
+        for line in proc.stdout:
+            logging.debug(f"[cloudflared] {line.strip()}")
+            match = pattern.search(line)
+            if match:
+                url = match.group(0)
+                PUBLIC_URL = url
+                logging.info(f"✅ Публичный URL радио: {url}")
+                # Запускаем фоновую нить, чтобы туннель продолжал жить
+                def keep_alive():
+                    for _ in proc.stdout:
+                        pass
+                threading.Thread(target=keep_alive, daemon=True).start()
+                return url
+    except Exception as e:
+        logging.error(f"Ошибка запуска туннеля: {e}")
+    return ""
 
 # ---------- TELEGRAM БОТ ----------
 bot = Bot(token=BOT_TOKEN)
@@ -197,42 +214,17 @@ async def start_cmd(message: types.Message):
         stream_url = PUBLIC_URL.rstrip('/') + "/radio.mp3"
     buttons = []
     if stream_url.startswith("https://"):
-        buttons.append([InlineKeyboardButton(text="🎵 СЛУШАТЬ ПОТОК", url=stream_url)])
+        buttons.append([InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=stream_url)])
     buttons.append([InlineKeyboardButton(text="📤 ЗАГРУЗИТЬ", callback_data="upload")])
     if message.from_user.id in ADMIN_IDS:
         buttons.append([InlineKeyboardButton(text="⏭ СЛЕДУЮЩИЙ", callback_data="next")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
-        f"🎵 *Super Radio Mini*\n"
-        f"Поток: `{stream_url or 'не задан'}`\n"
-        f"Используйте /seturl <адрес> для ручной установки.",
+        f"🎵 *Super Radio*\n"
+        f"Поток: `{stream_url or '⏳ поднимаю туннель...'}`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb
     )
-
-@dp.message(Command("seturl"))
-async def set_url_cmd(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.reply("⛔ Только для администраторов.")
-        return
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.reply("Использование: `/seturl https://ваш-домен.cloudpub.ru`", parse_mode=ParseMode.MARKDOWN)
-        return
-    new_url = parts[1].strip().rstrip('/')
-    if not new_url.startswith("https://"):
-        await message.reply("❌ URL должен начинаться с https://")
-        return
-    global PUBLIC_URL
-    PUBLIC_URL = new_url
-    try:
-        URL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        URL_FILE.write_text(new_url)
-        logging.info(f"Публичный URL установлен вручную: {PUBLIC_URL}")
-        await message.reply(f"✅ Публичный URL сохранён:\n`{PUBLIC_URL}`", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logging.error(f"Ошибка записи URL: {e}")
-        await message.reply(f"⚠️ URL установлен только на эту сессию: {e}")
 
 @dp.callback_query()
 async def callback_handler(callback: types.CallbackQuery):
@@ -240,7 +232,7 @@ async def callback_handler(callback: types.CallbackQuery):
         await callback.message.edit_text("📤 Отправь мне MP3 файл.")
     elif callback.data == "next" and callback.from_user.id in ADMIN_IDS:
         next_song()
-        await callback.answer("⏭ Переключили трек")
+        await callback.answer("⏭ Трек переключён")
     await callback.answer()
 
 @dp.message(F.audio | F.document)
@@ -250,7 +242,7 @@ async def handle_file(message: types.Message):
         return
     fname = file.file_name or "track.mp3"
     if not fname.lower().endswith((".mp3", ".ogg")):
-        await message.reply("❌ Только MP3 или OGG")
+        await message.reply("❌ Только MP3/OGG")
         return
     if file.file_size > 50*1024*1024:
         await message.reply("❌ Файл >50 МБ")
@@ -265,15 +257,20 @@ async def handle_file(message: types.Message):
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка: {e}")
 
+# ---------- MAIN ----------
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-    logging.info("Запуск мини-радио")
+    logging.info("Super Radio стартует...")
     load_playlist()
+
+    # HTTP-сервер
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', PORT), RadioHandler).serve_forever(), daemon=True).start()
     threading.Thread(target=audio_stream, daemon=True).start()
     threading.Thread(target=playlist_monitor, daemon=True).start()
-    threading.Thread(target=watch_for_url, daemon=True).start()
-    logging.info("Бот запущен, ожидаю публичный URL...")
+
+    # Запускаем туннель в отдельном потоке, чтобы не блочить бота
+    threading.Thread(target=start_cloudflare_tunnel, daemon=True).start()
+
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
