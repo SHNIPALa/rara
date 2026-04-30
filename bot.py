@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - Aiogram версия (стабильная)
+SUPER RADIO BOT - Aiogram с админкой
 """
 
 import os
@@ -9,9 +9,6 @@ import threading
 import random
 import json
 import sqlite3
-import subprocess
-import requests
-import asyncio
 from pathlib import Path
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -28,7 +25,6 @@ PORT = 8080
 MUSIC_FOLDER = "music"
 DATA_FOLDER = "data"
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-NGROK_TOKEN = os.getenv('NGROK_AUTH_TOKEN')
 ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 
 # Создаём папки
@@ -42,8 +38,6 @@ current_song_index = 0
 current_song_data = None
 current_song_position = 0
 clients = []
-public_url = None
-ngrok_ready = False
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -65,37 +59,7 @@ def init_db():
 
 init_db()
 
-# ==================== NGROK ТУННЕЛЬ ====================
-def start_ngrok():
-    global public_url, ngrok_ready
-    
-    try:
-        subprocess.run(['ngrok', 'config', 'add-authtoken', NGROK_TOKEN], capture_output=True)
-        subprocess.Popen(
-            ['ngrok', 'http', str(PORT), '--log=stdout'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        
-        for i in range(30):
-            try:
-                resp = requests.get('http://localhost:4040/api/tunnels', timeout=2)
-                tunnels = resp.json().get('tunnels', [])
-                for tunnel in tunnels:
-                    if tunnel.get('proto') == 'https':
-                        public_url = tunnel.get('public_url')
-                        ngrok_ready = True
-                        print(f"\n✅ NGROK: {public_url}")
-                        return True
-            except:
-                pass
-            time.sleep(1)
-        return False
-    except Exception as e:
-        print(f"Ngrok error: {e}")
-        return False
-
-# ==================== РАДИО ПЛЕЙЛИСТ ====================
+# ==================== РАДИО ====================
 def load_playlist():
     global playlist
     playlist = []
@@ -104,6 +68,8 @@ def load_playlist():
     if playlist:
         random.shuffle(playlist)
         print(f"📀 Загружено {len(playlist)} песен")
+        for i, song in enumerate(playlist[:5]):
+            print(f"   {i+1}. {song.name}")
     else:
         print(f"⚠️ НЕТ MP3! Положите файлы в папку 'music'")
 
@@ -140,7 +106,7 @@ def get_song_info():
             return {'title': song.stem, 'duration': '0:00'}
     return {'title': 'Нет песен', 'duration': '0:00'}
 
-# ==================== HTTP РАДИО СЕРВЕР ====================
+# ==================== HTTP СЕРВЕР ====================
 class RadioHandler(BaseHTTPRequestHandler):
     
     def log_message(self, format, *args):
@@ -172,7 +138,6 @@ class RadioHandler(BaseHTTPRequestHandler):
         
         elif self.path == '/':
             info = get_song_info()
-            web_url = public_url if public_url else f"http://localhost:{PORT}"
             
             html = f'''<!DOCTYPE html>
 <html>
@@ -226,18 +191,19 @@ class RadioHandler(BaseHTTPRequestHandler):
             margin-top:15px
         }}
         footer{{margin-top:20px;font-size:11px;color:#999}}
+        .live{{background:#ff4444;color:white;padding:2px 8px;border-radius:10px;font-size:10px;margin-left:5px}}
     </style>
 </head>
 <body>
     <div class="player">
         <h1>🎵 Super Radio</h1>
-        <div class="status">🟢 LIVE</div>
+        <div class="status">🟢 LIVE <span class="live">LIVE</span></div>
         <audio controls autoplay><source src="/radio.mp3" type="audio/mpeg"></audio>
         <div class="info">
             🎤 {info['title']}<br>
             👥 {len(clients)} слушателей | 📀 {len(playlist)} песен
         </div>
-        <div class="url">🔗 {web_url}</div>
+        <div class="url">🔗 <a href="http://localhost:{PORT}">http://localhost:{PORT}</a></div>
         <button onclick="window.location.href='/radio.mp3'">📥 Скачать поток</button>
         <footer>💡 Вставьте в VLC: Media → Open Network Stream</footer>
     </div>
@@ -310,7 +276,7 @@ def audio_stream():
         
         time.sleep(0.05)
 
-# ==================== AIOGRAM БОТ ====================
+# ==================== TELEGRAM БОТ ====================
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     user_id = message.from_user.id
@@ -323,22 +289,11 @@ async def start_command(message: types.Message):
     conn.commit()
     conn.close()
     
-    if not ngrok_ready or not public_url:
-        await message.answer(
-            "🎵 *SUPER RADIO*\n\n"
-            "⏳ *Радио запускается...*\n\n"
-            "Подождите 30 секунд, туннель создаётся.\n"
-            "Отправьте /start снова через минуту!",
-            parse_mode="Markdown"
-        )
-        return
-    
     info = get_song_info()
-    web_url = public_url
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
-        [InlineKeyboardButton(text="📥 СКАЧАТЬ ПОТОК", url=f"{web_url}/radio.mp3")],
+        [InlineKeyboardButton(text="🎵 ОТКРЫТЬ ПЛЕЕР", url=f"http://localhost:{PORT}")],
+        [InlineKeyboardButton(text="📥 СКАЧАТЬ ПОТОК", url=f"http://localhost:{PORT}/radio.mp3")],
         [InlineKeyboardButton(text="📤 ОТПРАВИТЬ ТРЕК", callback_data="upload")],
         [InlineKeyboardButton(text="📊 СТАТУС", callback_data="status")]
     ])
@@ -353,8 +308,8 @@ async def start_command(message: types.Message):
         f"┌─ 🎤 `{info['title']}`\n"
         f"├─ 👥 {len(clients)} слушателей\n"
         f"├─ 📀 {len(playlist)} песен\n"
-        f"└─ 🔗 `{web_url}`\n\n"
-        f"Отправьте ссылку друзьям!",
+        f"└─ 🌍 Локальное радио\n\n"
+        f"💡 Откройте плеер по кнопке ниже!",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -365,13 +320,11 @@ async def callback_handler(callback: types.CallbackQuery):
     
     if callback.data == "status":
         info = get_song_info()
-        web_url = public_url if public_url else "Локальный"
         await callback.message.edit_text(
             f"📊 *СТАТУС*\n\n"
             f"🎵 {info['title']}\n"
             f"👥 {len(clients)} слушателей\n"
-            f"📀 {len(playlist)} песен\n"
-            f"🔗 {web_url}",
+            f"📀 {len(playlist)} песен",
             parse_mode="Markdown"
         )
         await callback.answer()
@@ -380,7 +333,8 @@ async def callback_handler(callback: types.CallbackQuery):
         await callback.message.edit_text(
             "📤 *ОТПРАВЬТЕ MP3*\n\n"
             "Просто отправьте мне MP3 файл!\n\n"
-            "После одобрения трек появится в эфире.",
+            "✅ До 50MB\n"
+            "🎵 MP3 формат",
             parse_mode="Markdown"
         )
         await callback.answer()
@@ -446,17 +400,14 @@ async def show_admin_panel(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
     if pending:
-        keyboard.inline_keyboard.append(
-            [InlineKeyboardButton(text="📀 ТРЕКИ НА МОДЕРАЦИИ:", callback_data="none")]
-        )
         for song_id, filename, user_name, date in pending[:10]:
             keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text=f"✅ {filename[:20]}", callback_data=f"approve_{song_id}"),
+                InlineKeyboardButton(text=f"✅ {filename[:25]}", callback_data=f"approve_{song_id}"),
                 InlineKeyboardButton(text="❌", callback_data=f"reject_{song_id}")
             ])
     else:
         keyboard.inline_keyboard.append(
-            [InlineKeyboardButton(text="✅ Нет треков", callback_data="none")]
+            [InlineKeyboardButton(text="✅ Нет треков на модерации", callback_data="none")]
         )
     
     keyboard.inline_keyboard.append(
@@ -465,7 +416,7 @@ async def show_admin_panel(callback: types.CallbackQuery):
     
     await callback.message.edit_text(
         f"🔧 *АДМИН ПАНЕЛЬ*\n\n"
-        f"Треков на модерации: {len(pending)}",
+        f"📀 Треков на модерации: {len(pending)}",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -497,37 +448,26 @@ async def handle_audio(message: types.Message):
             conn.commit()
             conn.close()
             
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(
-                        admin_id,
-                        f"📀 *НОВЫЙ ТРЕК!*\n\nОт: {username}\nФайл: {file_name}",
-                        parse_mode="Markdown"
-                    )
-                except:
-                    pass
-            
             await msg.edit_text(f"✅ Трек отправлен на модерацию!")
         except Exception as e:
             await msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-@dp.message(Command("link"))
-async def link_command(message: types.Message):
-    if not ngrok_ready or not public_url:
-        await message.reply("⏳ Туннель ещё создаётся, подождите 30 секунд...")
-        return
-    
+@dp.message(Command("status"))
+async def status_command(message: types.Message):
+    info = get_song_info()
     await message.reply(
-        f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
-        f"`{public_url}`\n\n"
-        f"📱 Отправьте эту ссылку друзьям!",
+        f"📊 *СТАТУС*\n\n"
+        f"🎵 {info['title']}\n"
+        f"👥 {len(clients)} слушателей\n"
+        f"📀 {len(playlist)} песен\n"
+        f"🎚️ Сервер: ✅ Активен",
         parse_mode="Markdown"
     )
 
 # ==================== ЗАПУСК ====================
-async def on_startup():
+async def main():
     print("\n" + "=" * 50)
-    print("🎵 SUPER RADIO BOT (Aiogram)")
+    print("🎵 SUPER RADIO BOT")
     print("=" * 50)
     
     load_playlist()
@@ -535,25 +475,15 @@ async def on_startup():
     # Запуск сервера
     threading.Thread(target=run_radio_server, daemon=True).start()
     await asyncio.sleep(2)
+    
+    # Запуск аудио потока
     threading.Thread(target=audio_stream, daemon=True).start()
     
-    # Запуск ngrok
-    print("\n🔄 Запуск ngrok...")
-    threading.Thread(target=start_ngrok, daemon=True).start()
-    
-    # Ждём ngrok
-    for i in range(30):
-        if ngrok_ready and public_url:
-            print(f"\n✅ ССЫЛКА ДЛЯ ДРУЗЕЙ: {public_url}")
-            break
-        await asyncio.sleep(1)
-    
-    print("\n✅ БОТ ЗАПУЩЕН!")
+    print("\n✅ РАДИО РАБОТАЕТ: http://localhost:8080")
     print("=" * 50 + "\n")
-
-async def main():
-    await on_startup()
+    
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
+    import asyncio
     asyncio.run(main())
