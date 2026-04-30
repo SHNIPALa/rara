@@ -1,44 +1,39 @@
 version: '3.8'
 services:
   # ------------------------------------------------------------
-  # 1. ТВОЁ МИНИ-РАДИО (бот + HTTP-сервер с плеером и потоком)
+  # 1. Мини-радио (бот + плеер + поток)
   # ------------------------------------------------------------
   radio:
-    build: .                  # Dockerfile в текущей папке
+    build: .
     container_name: radio-mini
     restart: unless-stopped
     volumes:
-      - ./music:/app/music    # папка с mp3-файлами
+      - ./music:/app/music
+      - ./shared:/shared          # <-- общая папка для URL
     environment:
       - TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_IDS=${ADMIN_IDS}
-      # ПОКА ОСТАВЛЯЕМ ПУСТЫМ – адрес сам появится в логах cloudpub
+      # PUBLIC_URL оставляем пустым, бот сам найдёт адрес
       - PUBLIC_URL=
-    # этот порт не обязательно светить наружу, если идём через туннель
     expose:
       - "8080"
 
   # ------------------------------------------------------------
-  # 2. ОФИЦИАЛЬНЫЙ АГЕНТ CLOUDPUB (строго по документации)
+  # 2. Официальный агент CloudPub с сохранением вывода в файл
   # ------------------------------------------------------------
   cloudpub:
     image: cloudpub/cloudpub:latest
     container_name: radio-mini-cloudpub
     restart: unless-stopped
     environment:
-      # Токен из личного кабинета CloudPub
       - TOKEN=${CLOUDPUB_TOKEN}
-      # Публикуем HTTP-сервис radio на порту 8080
-      # Здесь radio – это имя сервиса, а 8080 – порт внутри контейнера
       - HTTP=radio:8080
-    # Ключевое изменение: команда run (вместо publish http)
-    command: run
+    # Перенаправляем весь вывод агента в файл, доступный radio
+    command: sh -c "cloudpub run > /shared/cloudpub_url.txt 2>&1"
     depends_on:
       - radio
-    # Чтобы адрес сохранялся при перезапусках, добавим том для конфигов
     volumes:
-      - cloudpub-config:/home/cloudpub
+      - ./shared:/shared
 
-# Том для хранения настроек агента (рекомендовано документацией)
-volumes:
-  cloudpub-config:
+# Для хранения файла с URL (можно и без тома, т.к. папка ./shared уже на хосте)
+volumes: {}
