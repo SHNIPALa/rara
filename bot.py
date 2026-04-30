@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для MPD + Icecast радио.
+Управляет MPD, принимает файлы, даёт ссылку на публичный поток.
 """
+
 import os, logging, sys, asyncio
 from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
@@ -13,8 +15,15 @@ from mpd import MPDClient
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
+# --- Парсинг ADMIN_IDS (надёжный) ---
+def parse_admin_ids():
+    raw = os.getenv("ADMIN_IDS", "")
+    if not raw:
+        return []
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
+ADMIN_IDS = parse_admin_ids()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8000/radio.mp3")
 MPD_HOST = os.getenv("MPD_HOST", "mpd")
 MPD_PORT = int(os.getenv("MPD_PORT", "6600"))
@@ -31,21 +40,26 @@ def mpd_client():
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    buttons = [
-        [InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=PUBLIC_URL)],
-        [InlineKeyboardButton(text="📤 ЗАГРУЗИТЬ", callback_data="upload")],
-        [InlineKeyboardButton(text="📊 СТАТУС", callback_data="status")]
-    ]
+    buttons = []
+
+    # Кнопка "Слушать" только если URL начинается с https (Telegram требует HTTPS)
+    if PUBLIC_URL.startswith("https://"):
+        buttons.append([InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=PUBLIC_URL)])
+
+    buttons.append([InlineKeyboardButton(text="📤 ЗАГРУЗИТЬ", callback_data="upload")])
+    buttons.append([InlineKeyboardButton(text="📊 СТАТУС", callback_data="status")])
+
+    # Админские кнопки
     if message.from_user.id in ADMIN_IDS:
         buttons.extend([
             [InlineKeyboardButton(text="⏯ ПАУЗА/ИГРАТЬ", callback_data="toggle")],
             [InlineKeyboardButton(text="⏭ ДАЛЕЕ", callback_data="next")],
             [InlineKeyboardButton(text="🔁 ОБНОВИТЬ БД", callback_data="update")]
         ])
+
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
-        "🎵 *MPD + Icecast Radio*\n"
-        f"Слушать: `{PUBLIC_URL}`",
+        f"🎵 *MPD + Icecast Radio*\nСлушать: `{PUBLIC_URL}`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb
     )
@@ -64,7 +78,7 @@ async def callback_handler(callback: types.CallbackQuery):
             text = f"Ошибка MPD: {e}"
         await callback.message.edit_text(text)
     elif data == "upload":
-        await callback.message.edit_text("📤 Отправь мне MP3/FLAC/OGG файл.")
+        await callback.message.edit_text("📤 Отправь мне MP3 / FLAC / OGG файл (до 50 МБ).")
     elif data == "toggle" and callback.from_user.id in ADMIN_IDS:
         try:
             with mpd_client() as c:
