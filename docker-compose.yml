@@ -1,23 +1,13 @@
 version: '3.8'
 
 services:
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared
-    restart: unless-stopped
-    command: tunnel --url http://host.docker.internal:8080
-    network_mode: host
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
   radio-bot:
     build: .
     container_name: super-radio
     restart: unless-stopped
-    depends_on:
-      - cloudflared
     network_mode: host
     volumes:
       - ./music:/app/music
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - NGROK_AUTH_TOKEN=${NGROK_AUTH_TOKEN}
