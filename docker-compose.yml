@@ -9,5 +9,6 @@ services:
     volumes:
       - ./music:/app/music
       - ./data:/app/data
+      - ./pending:/app/pending
     env_file:
       - .env
