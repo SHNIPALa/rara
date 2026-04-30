@@ -1,39 +1,28 @@
 version: '3.8'
 services:
   # ------------------------------------------------------------
-  # 1. Мини-радио (бот + плеер + поток)
+  # Мини-радио (бот + HTTP-сервер)
   # ------------------------------------------------------------
   radio:
     build: .
     container_name: radio-mini
     restart: unless-stopped
+    network_mode: host            # чтобы cloudpub мог достучаться до localhost:8080
     volumes:
       - ./music:/app/music
-      - ./shared:/shared          # <-- общая папка для URL
-    environment:
-      - TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
-      - ADMIN_IDS=${ADMIN_IDS}
-      # PUBLIC_URL оставляем пустым, бот сам найдёт адрес
-      - PUBLIC_URL=
-    expose:
-      - "8080"
+      - ./shared:/shared          # общая папка для URL-файла
 
   # ------------------------------------------------------------
-  # 2. Официальный агент CloudPub с сохранением вывода в файл
+  # Агент CloudPub (строго как вы просили, но с сохранением вывода)
   # ------------------------------------------------------------
   cloudpub:
     image: cloudpub/cloudpub:latest
     container_name: radio-mini-cloudpub
     restart: unless-stopped
+    network_mode: host            # чтобы видеть порт 8080 на хосте
     environment:
-      - TOKEN=${CLOUDPUB_TOKEN}
-      - HTTP=radio:8080
-    # Перенаправляем весь вывод агента в файл, доступный radio
-    command: sh -c "cloudpub run > /shared/cloudpub_url.txt 2>&1"
-    depends_on:
-      - radio
+      - TOKEN=${CLOUDPUB_TOKEN}   # ваш токен
+    # Команда почти как вы хотели: publish http 8080, но с tee для получения URL
+    command: sh -c "cloudpub publish http 8080 2>&1 | tee /shared/cloudpub_url.txt"
     volumes:
-      - ./shared:/shared
-
-# Для хранения файла с URL (можно и без тома, т.к. папка ./shared уже на хосте)
-volumes: {}
+      - ./shared:/shared          # чтобы записать файл с URL
