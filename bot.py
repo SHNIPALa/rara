@@ -4,23 +4,47 @@
 - Встроенный HTTP-плеер на порту 8080
 - Стриминг mp3-потока /radio.mp3
 - Telegram-бот для загрузки треков
+- Автоматически читает публичный URL из файла /shared/cloudpub_url.txt
 """
 
-import os, sys, time, threading, random, logging, asyncio
+import os
+import sys
+import time
+import threading
+import random
+import logging
+import asyncio
+import re
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 
-# ---------- КОНФИГУРАЦИЯ ----------
+# ---------- КОНФИГУРАЦИЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ----------
 PORT = int(os.getenv("PORT", "8080"))
 MUSIC_FOLDER = os.getenv("MUSIC_FOLDER", "music")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+
+# Безопасный парсинг ID администраторов
+def parse_admin_ids():
+    raw = os.getenv("ADMIN_IDS", "")
+    if not raw:
+        return []
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+ADMIN_IDS = parse_admin_ids()
+
+# Изначально PUBLIC_URL может быть пустым – бот сам найдёт его из файла
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 
+# Папка, куда CloudPub запишет URL
+SHARED_DIR = os.getenv("SHARED_DIR", "/shared")
+URL_FILE = Path(SHARED_DIR) / "cloudpub_url.txt"
+
+# Создаём папку для музыки
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
 # ---------- ПЛЕЙЛИСТ ----------
@@ -48,8 +72,8 @@ def next_song():
     with playlist_lock:
         if not playlist:
             return
-        path = playlist[0]  # цикл по кругу можно добавить, но оставим случайный
-        playlist.append(playlist.pop(0))
+        path = playlist[0]
+        playlist.append(playlist.pop(0))  # циклический сдвиг
     with song_lock:
         if current_song_file:
             current_song_file.close()
@@ -88,6 +112,7 @@ class RadioHandler(BaseHTTPRequestHandler):
                     clients.remove(wfile)
 
     def serve_web_player(self):
+        # Используем самый актуальный URL
         url = PUBLIC_URL or f"http://localhost:{PORT}"
         with clients_lock:
             listeners = len(clients)
@@ -153,6 +178,25 @@ def playlist_monitor():
         load_playlist()
         time.sleep(30)
 
+# ---------- АВТООПРЕДЕЛЕНИЕ URL ----------
+def watch_for_url():
+    """Фоновый поток: ждёт появления публичного URL в файле и печатает в лог."""
+    global PUBLIC_URL
+    pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.cloudpub\.ru')
+    while True:
+        try:
+            if URL_FILE.exists():
+                text = URL_FILE.read_text()
+                match = pattern.search(text)
+                if match:
+                    url = match.group(0)
+                    if url != PUBLIC_URL:
+                        PUBLIC_URL = url
+                        logging.info(f"✅ Публичный URL радио: {PUBLIC_URL}")
+        except Exception as e:
+            logging.error(f"Ошибка чтения URL из файла: {e}")
+        time.sleep(5)
+
 # ---------- TELEGRAM БОТ ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -160,6 +204,7 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     buttons = []
+    # Кнопка "Слушать" доступна только если есть HTTPS-адрес
     if PUBLIC_URL.startswith("https://"):
         buttons.append([InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=PUBLIC_URL)])
     buttons.append([InlineKeyboardButton(text="📤 ЗАГРУЗИТЬ", callback_data="upload")])
@@ -167,7 +212,7 @@ async def start_cmd(message: types.Message):
         buttons.append([InlineKeyboardButton(text="⏭ СЛЕДУЮЩИЙ", callback_data="next")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
-        f"🎵 *Super Radio Mini*\nСсылка: `{PUBLIC_URL}`",
+        f"🎵 *Super Radio Mini*\nСсылка: `{PUBLIC_URL or 'ещё не определена'}`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb
     )
@@ -188,7 +233,7 @@ async def handle_file(message: types.Message):
         return
     fname = file.file_name or "track.mp3"
     if not fname.lower().endswith((".mp3", ".ogg")):
-        await message.reply("❌ Только MP3")
+        await message.reply("❌ Только MP3 или OGG")
         return
     if file.file_size > 50*1024*1024:
         await message.reply("❌ Файл >50 МБ")
@@ -203,12 +248,23 @@ async def handle_file(message: types.Message):
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка: {e}")
 
+# ---------- ЗАПУСК ----------
 async def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+    logging.info("Запуск мини-радио")
+
     load_playlist()
+
+    # HTTP-сервер
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', PORT), RadioHandler).serve_forever(), daemon=True).start()
+    # Аудиопоток
     threading.Thread(target=audio_stream, daemon=True).start()
+    # Монитор плейлиста
     threading.Thread(target=playlist_monitor, daemon=True).start()
+    # Монитор URL от CloudPub
+    threading.Thread(target=watch_for_url, daemon=True).start()
+
+    logging.info("Бот запущен, ожидаю публичный URL...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
