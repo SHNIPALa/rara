@@ -5,9 +5,16 @@ services:
     build: .
     container_name: super-radio
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8080:8080"
     volumes:
       - ./music:/app/music
       - ./data:/app/data
+      - ./pending:/app/pending
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - NGROK_AUTH_TOKEN=${NGROK_AUTH_TOKEN}
+      - RADIO_PORT=8080
     env_file:
-      - .env
+      - .env  # Лучше хранить токены здесь
