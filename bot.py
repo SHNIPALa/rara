@@ -1,34 +1,25 @@
 #!/usr/bin/env python3
 """
-МИНИ-РАДИО на CloudPub
-- Встроенный HTTP-плеер на порту 8080
-- Стриминг mp3-потока /radio.mp3
-- Telegram-бот для загрузки треков
-- Автоматически читает публичный URL из файла /shared/cloudpub_url.txt
+МИНИ-РАДИО + авто-обнаружение URL от CloudPub
+- Стримит mp3 на порту 8080
+- Читает публичный URL из /shared/cloudpub_url.txt
+- Выводит его в собственный лог
+- Позволяет установить URL вручную через /seturl (админ)
 """
 
-import os
-import sys
-import time
-import threading
-import random
-import logging
-import asyncio
-import re
+import os, time, threading, random, logging, asyncio, re
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 
-# ---------- КОНФИГУРАЦИЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ----------
+# ---------- НАСТРОЙКИ ----------
 PORT = int(os.getenv("PORT", "8080"))
 MUSIC_FOLDER = os.getenv("MUSIC_FOLDER", "music")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Безопасный парсинг ID администраторов
 def parse_admin_ids():
     raw = os.getenv("ADMIN_IDS", "")
     if not raw:
@@ -37,14 +28,14 @@ def parse_admin_ids():
 
 ADMIN_IDS = parse_admin_ids()
 
-# Изначально PUBLIC_URL может быть пустым – бот сам найдёт его из файла
-PUBLIC_URL = os.getenv("PUBLIC_URL", "")
-
-# Папка, куда CloudPub запишет URL
 SHARED_DIR = os.getenv("SHARED_DIR", "/shared")
 URL_FILE = Path(SHARED_DIR) / "cloudpub_url.txt"
 
-# Создаём папку для музыки
+# Глобальный URL – пытаемся загрузить из файла
+PUBLIC_URL = ""
+if URL_FILE.exists():
+    PUBLIC_URL = URL_FILE.read_text().strip()
+
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
 # ---------- ПЛЕЙЛИСТ ----------
@@ -53,7 +44,6 @@ playlist_lock = threading.Lock()
 current_song_file = None
 current_song_position = 0
 song_lock = threading.Lock()
-
 clients = []
 clients_lock = threading.Lock()
 
@@ -73,7 +63,7 @@ def next_song():
         if not playlist:
             return
         path = playlist[0]
-        playlist.append(playlist.pop(0))  # циклический сдвиг
+        playlist.append(playlist.pop(0))
     with song_lock:
         if current_song_file:
             current_song_file.close()
@@ -81,7 +71,7 @@ def next_song():
         current_song_position = 0
         logging.info(f"Сейчас играет: {path.name}")
 
-# ---------- HTTP-СЕРВЕР РАДИО ----------
+# ---------- HTTP-СЕРВЕР ----------
 class RadioHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/radio.mp3', '/stream'):
@@ -112,13 +102,12 @@ class RadioHandler(BaseHTTPRequestHandler):
                     clients.remove(wfile)
 
     def serve_web_player(self):
-        # Используем самый актуальный URL
         url = PUBLIC_URL or f"http://localhost:{PORT}"
+        stream_url = url.rstrip('/') + "/radio.mp3"
         with clients_lock:
             listeners = len(clients)
         with playlist_lock:
             total = len(playlist)
-
         html = f'''<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><title>Radio</title>
@@ -133,10 +122,10 @@ footer{{margin-top:20px;font-size:12px;color:#999}}
 <body><div class="player">
 <h1>🎵 Super Radio</h1>
 <p>👥 {listeners} слушателей | 📀 {total} треков</p>
-<audio controls autoplay><source src="/radio.mp3" type="audio/mpeg"></audio>
+<audio controls autoplay><source src="{stream_url}" type="audio/mpeg"></audio>
 <a href="{url}">{url}</a><br>
-<button onclick="window.open('/radio.mp3')">📥 Поток</button>
-<footer>Открой в VLC: Media → Open Network Stream → {url}/radio.mp3</footer>
+<button onclick="window.open('{stream_url}')">📥 Поток</button>
+<footer>Прямой поток: {stream_url}</footer>
 </div></body>
 </html>'''
         self.send_response(200)
@@ -144,7 +133,7 @@ footer{{margin-top:20px;font-size:12px;color:#999}}
         self.end_headers()
         self.wfile.write(html.encode('utf-8'))
 
-# ---------- ПОТОКОВАЯ РАЗДАЧА ----------
+# ---------- АУДИОПОТОК ----------
 def audio_stream():
     global current_song_file, current_song_position
     while True:
@@ -178,23 +167,23 @@ def playlist_monitor():
         load_playlist()
         time.sleep(30)
 
-# ---------- АВТООПРЕДЕЛЕНИЕ URL ----------
+# ---------- ОБНАРУЖЕНИЕ URL ----------
 def watch_for_url():
-    """Фоновый поток: ждёт появления публичного URL в файле и печатает в лог."""
+    """Фоновый поток: читает файл, вытаскивает URL и печатает в лог."""
     global PUBLIC_URL
-    pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.cloudpub\.ru')
+    pattern = re.compile(r'(https://[a-zA-Z0-9\-]+\.cloudpub\.ru)')
     while True:
         try:
             if URL_FILE.exists():
                 text = URL_FILE.read_text()
                 match = pattern.search(text)
                 if match:
-                    url = match.group(0)
+                    url = match.group(1)
                     if url != PUBLIC_URL:
                         PUBLIC_URL = url
                         logging.info(f"✅ Публичный URL радио: {PUBLIC_URL}")
         except Exception as e:
-            logging.error(f"Ошибка чтения URL из файла: {e}")
+            logging.error(f"Ошибка чтения файла URL: {e}")
         time.sleep(5)
 
 # ---------- TELEGRAM БОТ ----------
@@ -203,19 +192,47 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
+    stream_url = ""
+    if PUBLIC_URL:
+        stream_url = PUBLIC_URL.rstrip('/') + "/radio.mp3"
     buttons = []
-    # Кнопка "Слушать" доступна только если есть HTTPS-адрес
-    if PUBLIC_URL.startswith("https://"):
-        buttons.append([InlineKeyboardButton(text="🎵 СЛУШАТЬ", url=PUBLIC_URL)])
+    if stream_url.startswith("https://"):
+        buttons.append([InlineKeyboardButton(text="🎵 СЛУШАТЬ ПОТОК", url=stream_url)])
     buttons.append([InlineKeyboardButton(text="📤 ЗАГРУЗИТЬ", callback_data="upload")])
     if message.from_user.id in ADMIN_IDS:
         buttons.append([InlineKeyboardButton(text="⏭ СЛЕДУЮЩИЙ", callback_data="next")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
-        f"🎵 *Super Radio Mini*\nСсылка: `{PUBLIC_URL or 'ещё не определена'}`",
+        f"🎵 *Super Radio Mini*\n"
+        f"Поток: `{stream_url or 'не задан'}`\n"
+        f"Используйте /seturl <адрес> для ручной установки.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb
     )
+
+@dp.message(Command("seturl"))
+async def set_url_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ Только для администраторов.")
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.reply("Использование: `/seturl https://ваш-домен.cloudpub.ru`", parse_mode=ParseMode.MARKDOWN)
+        return
+    new_url = parts[1].strip().rstrip('/')
+    if not new_url.startswith("https://"):
+        await message.reply("❌ URL должен начинаться с https://")
+        return
+    global PUBLIC_URL
+    PUBLIC_URL = new_url
+    try:
+        URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        URL_FILE.write_text(new_url)
+        logging.info(f"Публичный URL установлен вручную: {PUBLIC_URL}")
+        await message.reply(f"✅ Публичный URL сохранён:\n`{PUBLIC_URL}`", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logging.error(f"Ошибка записи URL: {e}")
+        await message.reply(f"⚠️ URL установлен только на эту сессию: {e}")
 
 @dp.callback_query()
 async def callback_handler(callback: types.CallbackQuery):
@@ -248,22 +265,14 @@ async def handle_file(message: types.Message):
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка: {e}")
 
-# ---------- ЗАПУСК ----------
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     logging.info("Запуск мини-радио")
-
     load_playlist()
-
-    # HTTP-сервер
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', PORT), RadioHandler).serve_forever(), daemon=True).start()
-    # Аудиопоток
     threading.Thread(target=audio_stream, daemon=True).start()
-    # Монитор плейлиста
     threading.Thread(target=playlist_monitor, daemon=True).start()
-    # Монитор URL от CloudPub
     threading.Thread(target=watch_for_url, daemon=True).start()
-
     logging.info("Бот запущен, ожидаю публичный URL...")
     await dp.start_polling(bot)
 
