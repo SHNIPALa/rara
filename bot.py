@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - xTunnel версия
+SUPER RADIO BOT - Linux + Docker версия
 """
 
 import os
@@ -9,9 +9,6 @@ import threading
 import random
 import json
 import sqlite3
-import subprocess
-import requests
-import asyncio
 from pathlib import Path
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -24,8 +21,8 @@ from aiogram.filters import Command
 PORT = 8080
 MUSIC_FOLDER = "music"
 DATA_FOLDER = "data"
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-XTUNNEL_TOKEN = os.getenv('XTUNNEL_TOKEN')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q")
+PUBLIC_URL = os.getenv('PUBLIC_URL', '')
 ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 
 # Создаём папки
@@ -39,8 +36,6 @@ current_song_index = 0
 current_song_data = None
 current_song_position = 0
 clients = []
-public_url = None
-tunnel_ready = False
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -58,46 +53,6 @@ def init_db():
     conn.close()
 
 init_db()
-
-# ==================== XTUNNEL ====================
-def start_xtunnel():
-    global public_url, tunnel_ready
-    
-    try:
-        print("🔄 Запуск xTunnel...")
-        
-        # Запуск xTunnel с токеном
-        process = subprocess.Popen(
-            ['xtunnel', '--token', XTUNNEL_TOKEN, 'http', str(PORT)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        
-        # Ждём получения URL
-        for i in range(60):
-            if process.stdout:
-                line = process.stdout.readline()
-                if line:
-                    print(f"  {line.strip()}")
-                    # Ищем URL в выводе
-                    if "https://" in line:
-                        import re
-                        match = re.search(r'https://[a-z0-9\-\.]+', line)
-                        if match:
-                            public_url = match.group(0)
-                            tunnel_ready = True
-                            print(f"\n✅ XTUNNEL URL: {public_url}")
-                            return True
-            time.sleep(1)
-        
-        print("⚠️ xTunnel не запустился")
-        return False
-        
-    except Exception as e:
-        print(f"Ошибка xTunnel: {e}")
-        return False
 
 # ==================== РАДИО ====================
 def load_playlist():
@@ -170,60 +125,36 @@ class RadioHandler(BaseHTTPRequestHandler):
         
         elif self.path == '/':
             info = get_song_info()
-            web_url = public_url if public_url else f"http://localhost:{PORT}"
+            web_url = PUBLIC_URL if PUBLIC_URL else f"http://localhost:{PORT}"
             
             html = f'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <title>🎵 Super Radio</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        *{{margin:0;padding:0;box-sizing:border-box}}
         body{{
-            font-family:'Segoe UI',sans-serif;
+            font-family:Arial;
             background:linear-gradient(135deg,#667eea,#764ba2);
             min-height:100vh;
             display:flex;
             justify-content:center;
             align-items:center;
-            padding:20px
+            margin:0;
+            padding:20px;
         }}
         .player{{
-            background:rgba(255,255,255,0.95);
-            border-radius:30px;
-            padding:40px;
-            max-width:500px;
-            width:100%;
+            background:white;
+            border-radius:20px;
+            padding:30px;
+            max-width:400px;
             text-align:center;
-            box-shadow:0 25px 50px rgba(0,0,0,0.3)
         }}
-        h1{{color:#764ba2;margin-bottom:10px}}
-        .status{{color:#4caf50;font-weight:bold;margin-bottom:20px}}
-        audio{{width:100%;margin:20px 0;border-radius:30px}}
-        .info{{
-            background:#f5f5f5;
-            padding:15px;
-            border-radius:15px;
-            margin:20px 0
-        }}
-        .url{{
-            background:#e8e8e8;
-            padding:12px;
-            border-radius:10px;
-            font-size:11px;
-            word-break:break-all
-        }}
-        button{{
-            background:linear-gradient(135deg,#667eea,#764ba2);
-            color:white;
-            border:none;
-            padding:12px 24px;
-            border-radius:30px;
-            cursor:pointer;
-            margin-top:15px
-        }}
-        footer{{margin-top:20px;font-size:11px;color:#999}}
+        h1{{color:#764ba2;}}
+        audio{{width:100%;margin:20px 0;}}
+        .info{{margin:15px 0;padding:10px;background:#f0f0f0;border-radius:10px;}}
+        .status{{color:#4caf50;font-weight:bold;}}
+        .url{{background:#e0e0e0;padding:8px;border-radius:8px;font-size:11px;word-break:break-all;}}
     </style>
 </head>
 <body>
@@ -237,7 +168,6 @@ class RadioHandler(BaseHTTPRequestHandler):
         </div>
         <div class="url">🔗 <a href="{web_url}">{web_url}</a></div>
         <button onclick="window.location.href='/radio.mp3'">📥 Скачать поток</button>
-        <footer>💡 Вставьте в VLC: Media → Open Network Stream</footer>
     </div>
     <script>
         setInterval(()=>{{
@@ -322,7 +252,7 @@ async def start_command(message: types.Message):
     conn.close()
     
     info = get_song_info()
-    web_url = public_url if public_url else "http://localhost:8080"
+    web_url = PUBLIC_URL if PUBLIC_URL else f"http://localhost:{PORT}"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
@@ -490,7 +420,7 @@ async def handle_audio(message: types.Message):
 
 @dp.message(Command("link"))
 async def link_command(message: types.Message):
-    web_url = public_url if public_url else "http://localhost:8080"
+    web_url = PUBLIC_URL if PUBLIC_URL else "http://localhost:8080"
     await message.reply(
         f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
         f"`{web_url}`\n\n"
@@ -500,45 +430,25 @@ async def link_command(message: types.Message):
 
 # ==================== ЗАПУСК ====================
 async def main():
-    global tunnel_ready, public_url
-    
     print("\n" + "=" * 50)
     print("🎵 SUPER RADIO BOT")
     print("=" * 50)
     
     load_playlist()
     
-    # Запуск сервера
+    # Запуск HTTP сервера
     threading.Thread(target=run_radio_server, daemon=True).start()
     await asyncio.sleep(2)
     
     # Запуск аудио потока
     threading.Thread(target=audio_stream, daemon=True).start()
     
-    # Запуск xTunnel
-    print("\n🔄 Запуск xTunnel...")
-    xtunnel_thread = threading.Thread(target=start_xtunnel, daemon=True)
-    xtunnel_thread.start()
-    
-    # Ждём туннель
-    for i in range(60):
-        if tunnel_ready and public_url:
-            print(f"\n✅ ТУННЕЛЬ СОЗДАН: {public_url}")
-            print("=" * 50)
-            print(f"🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ: {public_url}")
-            print("=" * 50)
-            break
-        await asyncio.sleep(1)
-    
-    if not public_url:
-        print("\n⚠️ ТУННЕЛЬ НЕ СОЗДАН!")
-        print("Запустите xTunnel вручную:")
-        print(f"   xtunnel --token {XTUNNEL_TOKEN} http {PORT}")
-    
-    print("\n✅ БОТ ЗАПУЩЕН!")
+    web_url = PUBLIC_URL if PUBLIC_URL else "http://localhost:8080"
+    print(f"\n🔗 ПУБЛИЧНАЯ ССЫЛКА: {web_url}")
     print("=" * 50 + "\n")
     
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
+    import asyncio
     asyncio.run(main())
