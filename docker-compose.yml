@@ -9,3 +9,5 @@ services:
     volumes:
       - ./music:/app/music
       - ./data:/app/data
+    env_file:
+      - .env
