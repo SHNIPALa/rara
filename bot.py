@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SUPER RADIO BOT - with ngrok
+SUPER RADIO BOT - with ngrok (без start.sh)
 """
 
 import os
@@ -8,6 +8,8 @@ import time
 import threading
 import random
 import json
+import subprocess
+import requests
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,8 +19,8 @@ from mutagen.mp3 import MP3
 # ==================== КОНФИГУРАЦИЯ ====================
 PORT = 8080
 MUSIC_FOLDER = "music"
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q")
-PUBLIC_URL = os.getenv('PUBLIC_URL', 'http://localhost:8080')
+TOKEN = "8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q"
+NGROK_TOKEN = "3D5S3qd6siwLLdtt2979DjuRq3E_84indTJkaSTtEJMx7jWoT"
 
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 
@@ -28,6 +30,45 @@ current_song_index = 0
 current_song_data = None
 current_song_position = 0
 clients = []
+public_url = None
+ngrok_process = None
+
+# ==================== ЗАПУСК NGROK ====================
+def start_ngrok():
+    global public_url, ngrok_process
+    
+    try:
+        # Настройка ngrok
+        subprocess.run(['ngrok', 'config', 'add-authtoken', NGROK_TOKEN], capture_output=True)
+        
+        # Запуск ngrok
+        ngrok_process = subprocess.Popen(
+            ['ngrok', 'http', str(PORT), '--log=stdout'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        # Ждём и получаем URL
+        for i in range(30):
+            try:
+                resp = requests.get('http://localhost:4040/api/tunnels', timeout=2)
+                tunnels = resp.json().get('tunnels', [])
+                for tunnel in tunnels:
+                    if tunnel.get('proto') == 'https':
+                        public_url = tunnel.get('public_url')
+                        print(f"\n✅ NGROK TUNNEL: {public_url}")
+                        return True
+            except:
+                pass
+            time.sleep(1)
+        
+        return False
+        
+    except Exception as e:
+        print(f"Ngrok error: {e}")
+        return False
 
 # ==================== ЗАГРУЗКА ПЛЕЙЛИСТА ====================
 def load_playlist():
@@ -98,7 +139,7 @@ class RadioHandler(BaseHTTPRequestHandler):
         
         elif self.path == '/':
             info = get_song_info()
-            web_url = PUBLIC_URL
+            web_url = public_url if public_url else f"http://localhost:{PORT}"
             
             html = f'''<!DOCTYPE html>
 <html>
@@ -123,40 +164,17 @@ class RadioHandler(BaseHTTPRequestHandler):
             max-width:500px;
             width:100%;
             text-align:center;
-            box-shadow:0 25px 50px rgba(0,0,0,0.3);
         }}
-        h1{{color:#764ba2;margin-bottom:10px}}
-        .status{{color:#4caf50;font-weight:bold;margin-bottom:20px}}
-        audio{{width:100%;margin:20px 0;border-radius:30px}}
-        .info{{
-            background:#f5f5f5;
-            padding:15px;
-            border-radius:15px;
-            margin:20px 0
-        }}
-        .url{{
-            background:#e8e8e8;
-            padding:12px;
-            border-radius:10px;
-            font-size:11px;
-            word-break:break-all
-        }}
-        button{{
-            background:linear-gradient(135deg,#667eea,#764ba2);
-            color:white;
-            border:none;
-            padding:12px 24px;
-            border-radius:30px;
-            cursor:pointer;
-            margin-top:15px
-        }}
-        footer{{margin-top:20px;font-size:11px;color:#999}}
+        h1{{color:#764ba2;}}
+        audio{{width:100%;margin:20px 0;}}
+        .info{{background:#f0f0f0;padding:15px;border-radius:15px;margin:20px 0;}}
+        .url{{background:#e0e0e0;padding:12px;border-radius:10px;font-size:11px;word-break:break-all;}}
+        button{{background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;padding:12px 24px;border-radius:30px;cursor:pointer;margin:5px;}}
     </style>
 </head>
 <body>
     <div class="player">
         <h1>🎵 Super Radio</h1>
-        <div class="status">🟢 LIVE</div>
         <audio controls autoplay><source src="/radio.mp3" type="audio/mpeg"></audio>
         <div class="info">
             🎤 {info['title']}<br>
@@ -164,7 +182,6 @@ class RadioHandler(BaseHTTPRequestHandler):
         </div>
         <div class="url">🔗 {web_url}</div>
         <button onclick="window.location.href='/radio.mp3'">📥 Скачать поток</button>
-        <footer>💡 Вставьте в VLC: Media → Open Network Stream</footer>
     </div>
     <script>
         setInterval(()=>{{
@@ -238,7 +255,7 @@ def background_stream():
 # ==================== TELEGRAM БОТ ====================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = get_song_info()
-    web_url = PUBLIC_URL
+    web_url = public_url if public_url else f"http://localhost:{PORT}"
     
     keyboard = [
         [InlineKeyboardButton("🎵 ОТКРЫТЬ ПЛЕЕР", url=web_url)],
@@ -264,12 +281,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "status":
         info = get_song_info()
+        web_url = public_url if public_url else "Ожидание..."
         await query.edit_message_text(
             f"📊 *СТАТУС*\n\n"
             f"🎵 {info['title']}\n"
             f"👥 {len(clients)} слушателей\n"
             f"📀 {len(playlist)} песен\n\n"
-            f"🔗 Ссылка: `{PUBLIC_URL}`",
+            f"🔗 Ссылка: `{web_url}`",
             parse_mode='Markdown'
         )
     elif query.data == "upload":
@@ -295,16 +313,19 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    web_url = public_url if public_url else "Ожидание туннеля..."
     await update.message.reply_text(
         f"🔗 *ССЫЛКА ДЛЯ ДРУЗЕЙ*\n\n"
-        f"`{PUBLIC_URL}`\n\n"
+        f"`{web_url}`\n\n"
         f"📱 Отправьте эту ссылку друзьям!\n"
         f"🎵 Она работает в браузере как плеер",
         parse_mode='Markdown'
     )
 
 # ==================== ЗАПУСК ====================
-def main():
+async def main():
+    global public_url
+    
     print("\n" + "=" * 50)
     print("🎵 SUPER RADIO BOT")
     print("=" * 50)
@@ -312,15 +333,34 @@ def main():
     # Загружаем плейлист
     load_playlist()
     
-    # Запускаем HTTP сервер в потоке
+    # Запускаем радио сервер
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
-    time.sleep(2)
+    await asyncio.sleep(2)
     
     # Запускаем стриминг
     stream_thread = threading.Thread(target=background_stream, daemon=True)
     stream_thread.start()
+    
+    # Запускаем ngrok
+    print("\n🔄 Запуск ngrok туннеля...")
+    ngrok_thread = threading.Thread(target=start_ngrok, daemon=True)
+    ngrok_thread.start()
+    
+    # Ждём ngrok
+    for i in range(30):
+        if public_url:
+            break
+        await asyncio.sleep(1)
+    
+    if public_url:
+        print(f"\n✅ ТУННЕЛЬ ГОТОВ: {public_url}")
+        print("=" * 50)
+        print(f"🔗 ССЫЛКА ДЛЯ ДРУЗЕЙ: {public_url}")
+        print("=" * 50)
+    else:
+        print("\n⚠️ Ngrok не запустился")
     
     # Запускаем бота
     app = Application.builder().token(TOKEN).build()
@@ -329,11 +369,11 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     
-    print(f"\n🔗 ПУБЛИЧНАЯ ССЫЛКА: {PUBLIC_URL}")
     print("\n✅ БОТ ЗАПУЩЕН!")
     print("=" * 50 + "\n")
     
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == '__main__':
-    main()
+    import asyncio
+    asyncio.run(main())
