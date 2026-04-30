@@ -8,3 +8,4 @@ services:
     network_mode: host
     volumes:
       - ./music:/app/music
+      - ./data:/app/data
