@@ -1,14 +1,24 @@
 version: '3.8'
-
 services:
-  radio-bot:
+  radio:
     build: .
     container_name: super-radio
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8080:8080"
     volumes:
       - ./music:/app/music
       - ./data:/app/data
       - ./pending:/app/pending
-    env_file:
-      - .env
+      - ./radio.log:/app/radio.log
+    environment:
+      - TELEGRAM_BOT_TOKEN=ваш_токен_бота
+      - ADMIN_IDS=123456789
+      - TUNNEL_SERVICE=localhost   # localhost, ngrok, cloudflare
+      - PORT=8080
+      # Если выбран ngrok, укажите токен:
+      # - NGROK_AUTH_TOKEN=токен_ngrok
+      # Если cloudflare с постоянным туннелем:
+      # - CLOUDFLARE_TUNNEL_NAME=имя_туннеля
+      # Чтобы использовать готовый URL без туннеля:
+      # - PUBLIC_URL=https://your-domain.com
