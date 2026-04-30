@@ -9,6 +9,5 @@ services:
     volumes:
       - ./music:/app/music
       - ./data:/app/data
-      - ./xtunnel:/usr/local/bin/xtunnel  # Монтируем xTunnel в контейнер
-    environment:
-      - TELEGRAM_BOT_TOKEN=8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q
+    env_file:
+      - .env
