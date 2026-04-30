@@ -1,7 +1,7 @@
 version: '3.8'
 services:
   mpd:
-    image: vimagick/mpd
+    image: ghcr.io/music-player-daemon/mpd:latest
     container_name: mpd-radio
     restart: unless-stopped
     volumes:
@@ -9,21 +9,21 @@ services:
       - ./music:/music
       - mpd-data:/var/lib/mpd
     ports:
-      - "6600:6600"   # управление (не обязательно наружу)
-      - "8000:8000"   # HTTP-поток
+      - "6600:6600"
+      - "8000:8000"
     command: mpd --no-daemon /etc/mpd.conf
 
   bot:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.bot
     container_name: radio-bot
     restart: unless-stopped
     volumes:
       - ./music:/music
     environment:
-      - TELEGRAM_BOT_TOKEN=ваш_токен
-      - ADMIN_IDS=123456789
+      - TELEGRAM_BOT_TOKEN=8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q
+      - ADMIN_IDS=1816361127
       - PUBLIC_URL=https://ваш-туннель-адрес/mpd.ogg
       - MPD_HOST=mpd
       - MPD_PORT=6600
@@ -36,7 +36,6 @@ services:
     container_name: radio-cf
     restart: unless-stopped
     command: tunnel --no-autoupdate run --url http://mpd:8000
-    # Для постоянного домена замените на команду с токеном
     depends_on:
       - mpd
 
