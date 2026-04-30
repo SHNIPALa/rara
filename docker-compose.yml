@@ -8,6 +8,3 @@ services:
     network_mode: host
     volumes:
       - ./music:/app/music
-    environment:
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - NGROK_AUTH_TOKEN=${NGROK_AUTH_TOKEN}
