@@ -37,6 +37,7 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q
       - ADMIN_IDS=1816361127
+      - CLOUDPUB_TOKEN=jmvgt7KEn3MTIPJX0AJibW9kKLSIoeaIVs46XDxygFY
       - PUBLIC_URL=${PUBLIC_URL}                      # сюда подставим туннельный URL
       - MPD_HOST=mpd
       - MPD_PORT=6600
