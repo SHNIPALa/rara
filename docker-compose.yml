@@ -9,9 +9,22 @@ services:
       - ./music:/music
       - mpd-data:/var/lib/mpd
     ports:
-      - "6600:6600"
-      - "8000:8000"
+      - "6600:6600"    # только для локального управления
+    depends_on:
+      - icecast  # ждём icecast
     command: mpd --no-daemon /etc/mpd.conf
+
+  icecast:
+    image: infiniteproject/icecast:latest
+    container_name: icecast-radio
+    restart: unless-stopped
+    volumes:
+      - ./icecast.xml:/etc/icecast2/icecast.xml
+    ports:
+      - "8000:8000"   # Icecast stream + web admin
+    environment:
+      - ICECAST_SOURCE_PASSWORD=hackme
+      - ICECAST_ADMIN_PASSWORD=hackme
 
   bot:
     build:
@@ -20,11 +33,11 @@ services:
     container_name: radio-bot
     restart: unless-stopped
     volumes:
-      - ./music:/music
+      - ./music:/music   # общая папка с mpd
     environment:
       - TELEGRAM_BOT_TOKEN=8726694308:AAF5_WwE1Tu9csG7ZKjwgG50n-1A5nByM4Q
       - ADMIN_IDS=1816361127
-      - PUBLIC_URL=https://ваш-туннель-адрес/mpd.ogg
+      - PUBLIC_URL=${PUBLIC_URL}                      # сюда подставим туннельный URL
       - MPD_HOST=mpd
       - MPD_PORT=6600
       - MUSIC_DIR=/music
@@ -35,9 +48,11 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: radio-cf
     restart: unless-stopped
-    command: tunnel --no-autoupdate run --url http://mpd:8000
+    command: tunnel --no-autoupdate run --url http://icecast:8000
     depends_on:
-      - mpd
+      - icecast
 
 volumes:
   mpd-data:
+
+
