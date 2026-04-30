@@ -1,61 +1,25 @@
 version: '3.8'
 services:
-  mpd:
-    image: ghcr.io/music-player-daemon/mpd:latest
-    container_name: mpd-radio
+  radio:
+    build: .
+    container_name: radio-mini
     restart: unless-stopped
     volumes:
-      - ./mpd.conf:/etc/mpd.conf
-      - ./music:/music
-      - mpd-data:/var/lib/mpd
-    depends_on:
-      - icecast
-    command: mpd --no-daemon /etc/mpd.conf
-
-  icecast:
-    image: infiniteproject/icecast:latest
-    container_name: icecast-radio
-    restart: unless-stopped
-    volumes:
-      - ./icecast.xml:/etc/icecast2/icecast.xml
-    ports:
-      - "8000:8000"   # локальный доступ (для теста)
-    environment:
-      - ICECAST_SOURCE_PASSWORD=hackme
-      - ICECAST_ADMIN_PASSWORD=hackme
-
-  bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: radio-bot
-    restart: unless-stopped
-    volumes:
-      - ./music:/music   # общая папка с mpd
+      - ./music:/app/music
     environment:
       - TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_IDS=${ADMIN_IDS}
-      - PUBLIC_URL=${PUBLIC_URL}             # например, https://xxx.cloudpub.ru/radio.mp3
-      - MPD_HOST=mpd
-      - MPD_PORT=6600
-      - MUSIC_DIR=/music
-    depends_on:
-      - mpd
+      - PUBLIC_URL=${PUBLIC_URL}
+    ports:
+      - "8080:8080"   # локально можно смотреть
 
   cloudpub:
     image: ermakdev/cloudpub-client:latest
-    container_name: radio-cloudpub
+    container_name: radio-mini-cloudpub
     restart: unless-stopped
     environment:
-      - CLOUDPUB_TOKEN=${CLOUDPUB_TOKEN}     # токен из личного кабинета CloudPub
-    command: http icecast:8000               # пробрасываем HTTP-порт Icecast
+      - CLOUDPUB_TOKEN=${CLOUDPUB_TOKEN}
+    command: http radio:8080   # туннель на наш radio-сервис
     depends_on:
-      - icecast
-
-volumes:
-  mpd-data:
-
-volumes:
-  mpd-data:
-
+      - radio
 
