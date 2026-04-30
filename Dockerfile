@@ -15,6 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 
-RUN mkdir -p music data
+RUN mkdir -p music data pending
 
 CMD ["python", "bot.py"]
