@@ -1,24 +1,44 @@
 version: '3.8'
 services:
-  radio:
-    build: .
-    container_name: super-radio
+  mpd:
+    image: vimagick/mpd
+    container_name: mpd-radio
     restart: unless-stopped
-    ports:
-      - "8080:8080"
     volumes:
-      - ./music:/app/music
-      - ./data:/app/data
-      - ./pending:/app/pending
-      - ./radio.log:/app/radio.log
+      - ./mpd.conf:/etc/mpd.conf
+      - ./music:/music
+      - mpd-data:/var/lib/mpd
+    ports:
+      - "6600:6600"   # управление (не обязательно наружу)
+      - "8000:8000"   # HTTP-поток
+    command: mpd --no-daemon /etc/mpd.conf
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: radio-bot
+    restart: unless-stopped
+    volumes:
+      - ./music:/music
     environment:
-      - TELEGRAM_BOT_TOKEN=ваш_токен_бота
+      - TELEGRAM_BOT_TOKEN=ваш_токен
       - ADMIN_IDS=123456789
-      - TUNNEL_SERVICE=localhost   # localhost, ngrok, cloudflare
-      - PORT=8080
-      # Если выбран ngrok, укажите токен:
-      # - NGROK_AUTH_TOKEN=токен_ngrok
-      # Если cloudflare с постоянным туннелем:
-      # - CLOUDFLARE_TUNNEL_NAME=имя_туннеля
-      # Чтобы использовать готовый URL без туннеля:
-      # - PUBLIC_URL=https://your-domain.com
+      - PUBLIC_URL=https://ваш-туннель-адрес/mpd.ogg
+      - MPD_HOST=mpd
+      - MPD_PORT=6600
+      - MUSIC_DIR=/music
+    depends_on:
+      - mpd
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: radio-cf
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --url http://mpd:8000
+    # Для постоянного домена замените на команду с токеном
+    depends_on:
+      - mpd
+
+volumes:
+  mpd-data:
