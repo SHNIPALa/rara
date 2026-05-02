@@ -1,11 +1,47 @@
 version: '3.8'
 services:
-  radio:
-    build: .
-    container_name: super-radio
+  mpd:
+    image: ghcr.io/music-player-daemon/mpd:latest
+    container_name: mpd-radio
     restart: unless-stopped
     volumes:
-      - ./music:/app/music
+      - ./mpd.conf:/etc/mpd.conf
+      - ./music:/music
+      - mpd-data:/var/lib/mpd
+    ports:
+      - "6600:6600"   # (по желанию, если нужно локальное управление)
+      - "8000:8000"   # HTTP-поток для туннеля
+    command: mpd --no-daemon /etc/mpd.conf
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: radio-bot
+    restart: unless-stopped
+    volumes:
+      - ./music:/music
+      - ./pending:/pending
+      - ./data:/data
     environment:
       - TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_IDS=${ADMIN_IDS}
+      - PUBLIC_URL=${PUBLIC_URL}   # сюда подставим URL после запуска туннеля
+      - MPD_HOST=mpd
+      - MPD_PORT=6600
+      - MUSIC_FOLDER=/music
+      - PENDING_FOLDER=/pending
+      - DATA_FOLDER=/data
+    depends_on:
+      - mpd
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: radio-cf
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --url http://mpd:8000
+    depends_on:
+      - mpd
+
+volumes:
+  mpd-data:
