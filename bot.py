@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Super Radio – управление MPD с автодиджеем.
+Super Radio DJ – MPD + авто‑туннель Cloudflare.
 """
 
-import os, logging, asyncio, json
+import os, time, threading, logging, asyncio, subprocess, re, socket, json
 from pathlib import Path
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
@@ -13,19 +13,22 @@ from aiogram.enums import ParseMode
 from mpd import MPDClient
 
 # ---------- Настройки ----------
+PORT = int(os.getenv("PORT", "8000"))            # порт HTTP-потока MPD
 MUSIC_FOLDER = os.getenv("MUSIC_FOLDER", "/music")
 PENDING_FOLDER = os.getenv("PENDING_FOLDER", "/pending")
 DATA_FOLDER = os.getenv("DATA_FOLDER", "/data")
+SHARED_DIR = os.getenv("SHARED_DIR", "/shared")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MPD_HOST = os.getenv("MPD_HOST", "mpd")
 MPD_PORT = int(os.getenv("MPD_PORT", "6600"))
-PUBLIC_URL = os.getenv("PUBLIC_URL", "")   # сюда пропишем URL от Cloudflare
 
 def parse_admin_ids():
     raw = os.getenv("ADMIN_IDS", "")
     return [int(x.strip()) for x in raw.split(",") if x.strip()] if raw else []
 
 ADMIN_IDS = parse_admin_ids()
+PUBLIC_URL = ""
+TUNNEL_ERROR = None
 
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 Path(PENDING_FOLDER).mkdir(exist_ok=True)
@@ -57,7 +60,7 @@ def remove_pending_song(filename):
     songs = [s for s in songs if s["filename"] != filename]
     save_pending_songs(songs)
 
-# ---------- MPD клиент ----------
+# ---------- MPD-клиент ----------
 def mpd_connect():
     client = MPDClient()
     client.timeout = 5
@@ -68,21 +71,18 @@ def current_track_info():
     try:
         with mpd_connect() as c:
             song = c.currentsong()
-            status = c.status()
             if not song:
-                return "Нет активного трека"
+                return "Нет треков"
             artist = song.get("artist", "Неизвестен")
-            title = song.get("title", song.get("file", "Без имени"))
+            title = song.get("title", song.get("file", "Без названия"))
             return f"{artist} - {title}"
-    except Exception as e:
-        logging.error(f"MPD error: {e}")
+    except:
         return "MPD недоступен"
 
 def toggle_pause():
     try:
         with mpd_connect() as c:
-            status = c.status()
-            if status.get("state") == "play":
+            if c.status().get("state") == "play":
                 c.pause(1)
             else:
                 c.play()
@@ -103,6 +103,70 @@ def update_db():
     except Exception as e:
         logging.error(f"MPD update error: {e}")
 
+# ---------- Туннель Cloudflare (в том же контейнере) ----------
+def start_cloudflare_tunnel():
+    global PUBLIC_URL, TUNNEL_ERROR
+    logging.info(f"Ожидание порта {PORT}...")
+    for _ in range(60):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        if s.connect_ex(('127.0.0.1', PORT)) == 0:
+            s.close()
+            logging.info("Порт MPD открыт, запускаю cloudflared...")
+            break
+        s.close()
+        time.sleep(0.5)
+    else:
+        TUNNEL_ERROR = "HTTP-порт MPD не доступен"
+        logging.error(TUNNEL_ERROR)
+        return
+
+    cmd = ['cloudflared', '--no-autoupdate', 'tunnel', '--url', f'http://127.0.0.1:{PORT}']
+    logging.info(f"Выполняется: {' '.join(cmd)}")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except Exception as e:
+        TUNNEL_ERROR = f"Не удалось запустить cloudflared: {e}"
+        logging.error(TUNNEL_ERROR)
+        return
+
+    pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
+    # Записываем URL в файл в общей папке, чтобы бот его подхватил
+    url_file = Path(SHARED_DIR) / "public_url.txt"
+    start_time = time.time()
+    for line in proc.stdout:
+        logging.info(f"[cloudflared] {line.strip()}")
+        match = pattern.search(line)
+        if match:
+            url = match.group(0)
+            PUBLIC_URL = url
+            url_file.write_text(url)
+            logging.info(f"✅ Публичный URL: {url}")
+            def keep_alive():
+                for _ in proc.stdout:
+                    pass
+            threading.Thread(target=keep_alive, daemon=True).start()
+            return
+        if time.time() - start_time > 30:
+            TUNNEL_ERROR = "Туннель не выдал URL за 30 секунд"
+            logging.error(TUNNEL_ERROR)
+            break
+    else:
+        TUNNEL_ERROR = f"cloudflared завершился (код {proc.poll()})"
+        logging.error(TUNNEL_ERROR)
+
+def watch_for_url():
+    """Фоновый поток: читает URL из файла, если он появился."""
+    global PUBLIC_URL
+    url_file = Path(SHARED_DIR) / "public_url.txt"
+    while True:
+        if url_file.exists():
+            url = url_file.read_text().strip()
+            if url.startswith("https://") and url != PUBLIC_URL:
+                PUBLIC_URL = url
+                logging.info(f"Публичный URL обновлён из файла: {url}")
+        time.sleep(5)
+
 # ---------- Бот ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -116,7 +180,6 @@ def main_menu_keyboard(user_id):
         pending_count = len(load_pending_songs())
         btn_text = f"🔧 МОДЕРАЦИЯ ({pending_count})" if pending_count else "🔧 МОДЕРАЦИЯ"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data="moderate")])
-        # Кнопки управления MPD
         try:
             with mpd_connect() as c:
                 state = c.status().get("state", "stop")
@@ -132,12 +195,14 @@ async def start_cmd(message: types.Message):
     kb = main_menu_keyboard(message.from_user.id)
     song = current_track_info()
     info = ""
-    if PUBLIC_URL:
+    if TUNNEL_ERROR:
+        info = f"❌ Ошибка туннеля: {TUNNEL_ERROR}\n"
+    elif PUBLIC_URL:
         url_escaped = PUBLIC_URL.replace("<", "&lt;").replace(">", "&gt;")
         info = (f"🎧 <b>{song}</b>\n"
                 f"🔊 Прямой эфир: <a href='{url_escaped}'>{url_escaped}</a>\n")
     else:
-        info = "⏳ Ожидание публичного URL..."
+        info = "⏳ Туннель ещё поднимается...\n"
     await message.answer(f"🎵 <b>Super Radio DJ</b>\n{info}", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 @dp.callback_query()
@@ -196,7 +261,7 @@ def approve_song(filename):
     dst = Path(MUSIC_FOLDER) / filename
     if src.exists():
         src.rename(dst)
-        update_db()  # обновляем базу MPD
+        update_db()
     remove_pending_song(filename)
 
 def reject_song(filename):
@@ -210,8 +275,8 @@ async def handle_file(message: types.Message):
     file = message.audio or message.document
     if not file: return
     fname = file.file_name or "track.mp3"
-    if not fname.lower().endswith((".mp3", ".ogg", ".flac", ".m4a")):
-        await message.reply("❌ Поддерживаются MP3, OGG, FLAC, M4A")
+    if not fname.lower().endswith((".mp3", ".ogg", ".flac", ".m4a", ".wav")):
+        await message.reply("❌ Поддерживаются MP3, OGG, FLAC, M4A, WAV")
         return
     if file.file_size > 50*1024*1024:
         await message.reply("❌ >50 МБ")
@@ -237,6 +302,12 @@ async def handle_file(message: types.Message):
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     logging.info("Запуск Super Radio DJ...")
+
+    # Фоновый монитор URL
+    threading.Thread(target=watch_for_url, daemon=True).start()
+    # Запускаем туннель (ждёт открытия порта 8000 от MPD)
+    threading.Thread(target=start_cloudflare_tunnel, daemon=True).start()
+
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
