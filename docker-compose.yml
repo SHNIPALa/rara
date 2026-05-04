@@ -1,39 +1,17 @@
 version: '3.8'
 services:
-  mpd:
-    image: ghcr.io/music-player-daemon/mpd:latest
-    container_name: mpd-radio
-    restart: unless-stopped
-    volumes:
-      - ./mpd.conf:/etc/mpd.conf
-      - ./music:/music
-      - mpd-data:/var/lib/mpd
-    expose:
-      - "6600"   # не обязательно наружу
-      - "8000"   # HTTP-поток
-
-  bot:
+  radio:
     build: .
-    container_name: radio-bot
+    container_name: super-radio
     restart: unless-stopped
-    network_mode: host   # чтобы cloudflared видел mpd:8000 (localhost)
     volumes:
-      - ./music:/music
-      - ./pending:/pending
-      - ./data:/data
-      - ./shared:/shared
+      - ./music:/app/music
+      - ./pending:/app/pending
+      - ./data:/app/data
     environment:
       - TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_IDS=${ADMIN_IDS}
-      - MPD_HOST=localhost          # т.к. network_mode: host
-      - MPD_PORT=6600
-      - PORT=8000
-      - MUSIC_FOLDER=/music
-      - PENDING_FOLDER=/pending
-      - DATA_FOLDER=/data
-      - SHARED_DIR=/shared
-    depends_on:
-      - mpd
-
-volumes:
-  mpd-data:
+      - PORT=8080
+      - MUSIC_FOLDER=/app/music
+      - PENDING_FOLDER=/app/pending
+      - DATA_FOLDER=/app/data
