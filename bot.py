@@ -22,10 +22,9 @@ PORT = int(os.getenv("PORT", "8080"))
 MUSIC_FOLDER = os.getenv("MUSIC_FOLDER", "music")
 PENDING_FOLDER = os.getenv("PENDING_FOLDER", "pending")
 DATA_FOLDER = os.getenv("DATA_FOLDER", "data")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
+BOT_TOKEN = "8726694308:AAErJWsA39t3b_x4nq-8R1jHah5UlE5wMkY"
 def parse_admin_ids() -> List[int]:
-    raw = os.getenv("ADMIN_IDS", "")
+    raw = "1816361127"
     return [int(x.strip()) for x in raw.split(",") if x.strip()] if raw else []
 
 ADMIN_IDS = parse_admin_ids()
@@ -411,31 +410,46 @@ async def handle_file(message: types.Message):
     file = message.audio or message.document
     if not file:
         return
+
     fname = file.file_name or "track.mp3"
+    logging.info(f"Получен файл: {fname} (размер: {file.file_size} байт)")
+
+    # Проверка расширения
     if not fname.lower().endswith((".mp3", ".ogg", ".flac", ".m4a", ".wav")):
-        await message.reply("❌ Поддерживаются MP3, OGG, FLAC, M4A, WAV")
+        await message.reply("❌ Поддерживаются только MP3, OGG, FLAC, M4A, WAV")
         return
-    if file.file_size > 50*1024*1024:
-        await message.reply("❌ >50 МБ")
+
+    # Проверка размера
+    if file.file_size > 50 * 1024 * 1024:
+        await message.reply("❌ Файл больше 50 МБ")
         return
+
     msg = await message.reply("📥 Загружаю…")
+
     try:
+        # Получаем информацию о файле с сервера Telegram
         file_info = await bot.get_file(file.file_id)
+        logging.info(f"Путь для скачивания: {file_info.file_path}")
+
         user_id = message.from_user.id
         user_name = message.from_user.username or str(user_id)
+
         if user_id in ADMIN_IDS:
             dest = Path(MUSIC_FOLDER) / fname
+            logging.info(f"Админ загружает в {dest}")
             await bot.download_file(file_info.file_path, destination=str(dest))
             player.load_playlist()
             player.start_playback_if_idle()
             await msg.edit_text("✅ Трек сразу в эфире!")
         else:
             dest = Path(PENDING_FOLDER) / fname
+            logging.info(f"Пользователь загружает в pending: {dest}")
             await bot.download_file(file_info.file_path, destination=str(dest))
             add_pending_song(fname, user_id, user_name)
             await msg.edit_text("📨 Отправлено на модерацию. Спасибо!")
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {e}")
+        logging.error(f"Ошибка загрузки файла '{fname}': {e}", exc_info=True)
+        await msg.edit_text(f"❌ Ошибка при загрузке: {e}")
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
