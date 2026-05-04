@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-Super Radio DJ — надёжный автодиджей с плавными переходами (v3)
-- Автоматическое удаление неактивных слушателей
-- Ограничение максимального числа подключений
-- Предзагрузка следующего трека для gapless воспроизведения
-- Модерация треков через Telegram-бота
-- Автоматический туннель Cloudflare
+Super Radio DJ – стабильный аудиопоток (final)
+Немедленный старт, защита от зависших слушателей, автотуннель Cloudflare.
 """
 
 import os, time, threading, random, logging, asyncio, subprocess, re, socket, json
@@ -36,6 +32,7 @@ ADMIN_IDS = parse_admin_ids()
 PUBLIC_URL = ""
 TUNNEL_ERROR: Optional[str] = None
 
+# Создаём папки
 Path(MUSIC_FOLDER).mkdir(exist_ok=True)
 Path(PENDING_FOLDER).mkdir(exist_ok=True)
 Path(DATA_FOLDER).mkdir(exist_ok=True)
@@ -67,7 +64,7 @@ def remove_pending_song(filename: str) -> None:
     songs = [s for s in songs if s["filename"] != filename]
     save_pending_songs(songs)
 
-# ================== Радиоплеер с контролем клиентов ==================
+# ================== Радиоплеер ==================
 class RadioPlayer:
     def __init__(self, max_clients=100, client_timeout=30):
         self.playlist: List[Path] = []
@@ -77,8 +74,8 @@ class RadioPlayer:
         self.song_info = "Нет треков"
         self.lock = threading.Lock()
 
-        # Новое: учёт клиентов с временем последней активности
-        self.clients: Dict[object, float] = {}   # wfile -> time.monotonic()
+        # Учёт клиентов с временем последней активности
+        self.clients: Dict[object, float] = {}
         self.clients_lock = threading.Lock()
         self.max_clients = max_clients
         self.client_timeout = client_timeout
@@ -149,7 +146,6 @@ class RadioPlayer:
 
     # --- Управление клиентами ---
     def add_client(self, wfile) -> bool:
-        """Добавить клиента, если не превышен лимит. Возвращает True при успехе."""
         with self.clients_lock:
             if len(self.clients) >= self.max_clients:
                 return False
@@ -168,7 +164,6 @@ class RadioPlayer:
                 self.clients[wfile] = time.monotonic()
 
     def prune_inactive_clients(self) -> int:
-        """Удалить клиентов, неактивных дольше client_timeout секунд. Возвращает количество удалённых."""
         now = time.monotonic()
         with self.clients_lock:
             inactive = [w for w, last in self.clients.items() if now - last > self.client_timeout]
@@ -178,10 +173,25 @@ class RadioPlayer:
                 logging.info(f"Удалено {len(inactive)} неактивных слушателей")
             return len(inactive)
 
+    def send_initial_chunk(self, wfile):
+        """Отправить первый кусок аудио новому клиенту, чтобы плеер сразу начал играть."""
+        with self.lock:
+            if self.current_file:
+                self.current_file.seek(self.position)
+                chunk = self.current_file.read(65536)  # 64 КБ для быстрой буферизации
+                if chunk:
+                    try:
+                        wfile.write(chunk)
+                        wfile.flush()
+                        self.update_client_activity(wfile)
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки начального чанка: {e}")
+                        self.remove_client(wfile)
+
 # Глобальный объект плеера
 player = RadioPlayer(max_clients=100, client_timeout=30)
 
-# ---------- HTTP‑сервер (чистый поток) ----------
+# ---------- HTTP‑сервер ----------
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
@@ -198,7 +208,7 @@ class RadioHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"OK")
             return
 
-        # Пытаемся добавить клиента
+        # Любой другой путь – чистый аудиопоток
         if not player.add_client(self.wfile):
             self.send_response(503)
             self.send_header('Content-Type', 'text/plain')
@@ -211,11 +221,12 @@ class RadioHandler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-cache')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        # Дальнейшую раздачу выполняет audio_stream_worker
 
-# ---------- Потоковая раздача аудиоданных ----------
+        # Мгновенно отправляем первый фрагмент
+        player.send_initial_chunk(self.wfile)
+
+# ---------- Потоковая раздача ----------
 def audio_stream_worker():
-    """Непрерывно читает текущий файл и рассылает чанки клиентам, поддерживая их актуальность."""
     last_prune = time.monotonic()
     while True:
         if player.current_file is None:
@@ -226,7 +237,7 @@ def audio_stream_worker():
             if player.current_file is None:
                 continue
             player.current_file.seek(player.position)
-            chunk = player.current_file.read(8192)
+            chunk = player.current_file.read(32768)  # 32 КБ
             if chunk:
                 player.position += len(chunk)
                 with player.clients_lock:
@@ -240,7 +251,7 @@ def audio_stream_worker():
             else:
                 player.switch_to_next()
 
-        # Периодическая чистка неактивных клиентов (раз в 10 секунд)
+        # Периодическая чистка неактивных клиентов
         now = time.monotonic()
         if now - last_prune >= 10:
             player.prune_inactive_clients()
@@ -426,10 +437,9 @@ async def handle_file(message: types.Message):
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка: {e}")
 
-# ---------- Запуск ----------
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-    logging.info("Запуск Super Radio DJ v3")
+    logging.info("Запуск Super Radio DJ (final)")
 
     player.load_playlist()
     player.start_playback_if_idle()
